@@ -43,6 +43,23 @@ _CENTERED_KEYS = {"quantity", "year"}
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
 _HEADERS = [label for _key, label in EXCEL_COLUMNS]
 
+# Rows needing the most urgent review should be the first thing a reviewer
+# sees, not buried after everything else - note this is the opposite order
+# from fields.CONFIDENCE_LEVELS (which lists גבוהה first; that list is about
+# validating/describing the closed set of values, unrelated to display order).
+CONFIDENCE_SORT_ORDER = {"נמוכה": 0, "בינונית": 1, "גבוהה": 2}
+
+
+def sort_by_confidence(records: List[dict]) -> List[dict]:
+    """Sorts records so נמוכה rows come first, then בינונית, then גבוהה - a
+    stable sort, so rows within the same confidence level keep their
+    relative order (batch/processing order) rather than being shuffled.
+    Public so streamlit_app.py can keep its on-screen table in the same
+    order as the file write_records() below is about to produce, instead of
+    the two silently drifting apart.
+    """
+    return sorted(records, key=lambda r: CONFIDENCE_SORT_ORDER.get(r.get("confidence"), len(CONFIDENCE_SORT_ORDER)))
+
 
 def parse_quantity(value: str) -> Optional[float]:
     """Parses a quantity string like '15,520.00' into a float, or None if it
@@ -75,8 +92,12 @@ def write_records(records: List[dict], output_path: Path) -> None:
     whose רמת_ביטחון is "נמוכה"/"בינונית" are highlighted red/yellow so they're
     easy to find for manual review; that always wins over the plain banded-row
     background. The source-file column is a hyperlink to the original file
-    under input/.
+    under input/. Rows are written in confidence order (נמוכה first) - see
+    sort_by_confidence() - so the ones needing review are at the top, not
+    scattered through the sheet in whatever order they were processed.
     """
+    records = sort_by_confidence(records)
+
     wb = Workbook()
     ws = wb.active
     ws.title = _MAIN_SHEET_NAME

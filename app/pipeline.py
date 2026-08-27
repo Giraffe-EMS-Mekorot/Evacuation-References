@@ -10,8 +10,10 @@ from typing import Callable, List, Optional
 import anthropic
 
 from . import config
+from .excel_writer import read_existing_records
 from .extractor import extract_certificate_pages
 from .fields import empty_record
+from .normalize import NameNormalizer
 
 # Called as on_progress(index, total, path) right before each file is sent to
 # the model - lets a caller (CLI print, Streamlit status widget) show progress
@@ -36,17 +38,28 @@ def process_files(
     PDF, one for a plain image). A file that can't even be opened/split at
     all never aborts the batch - it's recorded via fields.empty_record() with
     the exception text in its notes, and processing continues with the rest.
+
+    Also runs each record's free-text name fields (site/reference_type)
+    through NameNormalizer, bootstrapped from whatever's already in
+    output/ריכוז_תעודות.xlsx - see app/normalize.py. This applies uniformly
+    to both the CLI and the Streamlit UI, since both call this function.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    normalizer = NameNormalizer.build_from_records(
+        read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
+    )
     records = []
     total = len(paths)
     for index, path in enumerate(paths, start=1):
         if on_progress:
             on_progress(index, total, path)
         try:
-            records.extend(extract_certificate_pages(path, client=client))
+            page_records = extract_certificate_pages(path, client=client)
         except Exception as exc:  # the whole file couldn't be opened/split at all
             if on_error:
                 on_error(path, exc)
-            records.append(empty_record(path.name, str(exc)))
+            page_records = [empty_record(path.name, str(exc))]
+        for record in page_records:
+            normalizer.normalize(record)
+        records.extend(page_records)
     return records

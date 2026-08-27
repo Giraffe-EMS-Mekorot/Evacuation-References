@@ -18,6 +18,7 @@ back to a `document` block, not re-litigating the multi-page split.
 """
 import base64
 import io
+from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,25 +28,37 @@ from PIL import Image
 
 from . import config
 from .derive import derive_year_month
-from .fields import CONFIDENCE_LEVELS, FIELD_DEFS, REGIONS, WASTE_TYPES, empty_record
+from .fields import CONFIDENCE_LEVELS, FIELD_DEFS, HEBREW_MONTHS, REGIONS, WASTE_TYPES, empty_record
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 _TOOL_NAME = "record_certificate_data"
 
-# Longest side, in pixels, after downscaling - comfortably below anything
-# that would risk a 413, while staying legible for both print and handwriting.
-_MAX_DIMENSION = 2000
-_JPEG_QUALITY = 85
-# Render PDF pages at ~200 DPI before downscaling - high enough that small
-# handwriting survives the resize down to _MAX_DIMENSION, not so high that a
-# single page wastes memory rendering detail that gets thrown away anyway.
-_PDF_RENDER_SCALE = 200 / 72
+# Adaptive downscaling ladder: try the highest resolution first and only step
+# down as far as actually needed to clear _MAX_IMAGE_BYTES, instead of
+# shrinking every page to one fixed size regardless of how compressible it
+# is. 3000 is the top of the "2600-3000px" range from the spec - starting at
+# the ceiling, not the middle, actually maximizes resolution per-page as
+# intended; a smaller/plainer scan may well clear the limit on the first try
+# and keep its full 3000px, while a noisier one steps down only as needed.
+_ADAPTIVE_DIMENSIONS = [3000, 2600, 2200, 1800]
+_JPEG_QUALITY = 90
+# Render PDF pages at 300 DPI before downscaling - high enough that a
+# standard page (A4/Letter) actually renders past 3000px on its long side,
+# so the adaptive ladder above has real headroom to pick from; at the ~200
+# DPI this used to render at, a standard page tops out under 2400px and the
+# "try 3000 first" step would never have anything to bite on.
+_PDF_RENDER_SCALE = 300 / 72
 # Safety net for step 4 of the fix: matches Anthropic's documented per-image
-# limit. In practice a page downscaled to _MAX_DIMENSION/_JPEG_QUALITY should
-# never get close to this - this guards the case where it somehow still does
-# (e.g. a pathologically noisy scan) rather than sending it and hoping.
+# limit. In practice a page that's stepped all the way down to 1800px at
+# quality 90 should never get close to this - this guards the case where it
+# somehow still does (e.g. a pathologically noisy scan) rather than sending
+# it and hoping.
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# Below this year, a certificate's date is treated as an OCR/garbled-digit
+# misread rather than a real date - generous margin (10+ years) so it only
+# catches clearly-wrong values, not just old certificates.
+_MIN_PLAUSIBLE_YEAR = 2015
 
 # Core fields (per the original spec) whose absence should always get a
 # record flagged for manual review, regardless of what the model itself
@@ -97,23 +110,35 @@ def _build_tool_schema() -> dict:
 
 
 def _downscale_and_encode(image: Image.Image) -> bytes:
-    """Resizes `image` so its longest side is at most _MAX_DIMENSION pixels
-    (never upscales a smaller image) and re-encodes it as a JPEG at
-    _JPEG_QUALITY. This is what actually keeps each request small enough for
-    the API - see the module docstring for why every page goes through this,
-    not just ones from an oversized multi-page PDF.
+    """Encodes `image` as a JPEG, trying _ADAPTIVE_DIMENSIONS from highest to
+    lowest and stopping at the first one that clears _MAX_IMAGE_BYTES - keeps
+    each specific page at the best resolution *it* can afford, rather than
+    shrinking every page to the same fixed size up front regardless of how
+    compressible it actually turns out to be. Never upscales past the
+    image's own native size. If every step is still oversized, returns the
+    smallest (last) attempt anyway - the caller checks the size and turns
+    that into a clear per-page failure instead of sending it.
     """
     if image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
     width, height = image.size
     longest = max(width, height)
-    if longest > _MAX_DIMENSION:
-        ratio = _MAX_DIMENSION / longest
-        new_size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
-        image = image.resize(new_size, Image.LANCZOS)
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
-    return buffer.getvalue()
+
+    encoded = b""
+    for max_dimension in _ADAPTIVE_DIMENSIONS:
+        if longest > max_dimension:
+            ratio = max_dimension / longest
+            resized = image.resize(
+                (max(1, round(width * ratio)), max(1, round(height * ratio))), Image.LANCZOS
+            )
+        else:
+            resized = image
+        buffer = io.BytesIO()
+        resized.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
+        encoded = buffer.getvalue()
+        if len(encoded) <= _MAX_IMAGE_BYTES:
+            return encoded
+    return encoded
 
 
 def _encode_image_block(jpeg_bytes: bytes) -> dict:
@@ -163,6 +188,45 @@ def _append_page_note(record: dict, page_index: int, page_total: int) -> None:
     record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
+def _flag_unreasonable_date(record: dict) -> None:
+    """Flags a record whose derived year/month is implausible for a waste
+    certificate: later than the current month (a certificate can't predate
+    its own creation), or old enough to almost certainly be an OCR/garbled-
+    digit misread (see _MIN_PLAUSIBLE_YEAR) rather than a real date.
+
+    There was no date-sanity check anywhere in this pipeline before this -
+    derive.py only validates that the string is a well-formed DD/MM/YYYY (or
+    DD/MM/YY) date, never that the resulting date makes sense. This adds
+    that check; it doesn't fix a pre-existing one.
+
+    Deliberately does not attempt to correct the value (e.g. try swapping
+    day/month on the theory the source used MM/DD) - genuinely ambiguous
+    cases like 03/04/2026 can't be resolved without more context, and
+    guessing would violate this pipeline's "never guess, flag for a human
+    instead" policy used everywhere else (see _flag_out_of_list_values,
+    _enforce_core_field_confidence).
+    """
+    year_str, month_name = record.get("year"), record.get("month")
+    if not year_str or not month_name:
+        return
+    try:
+        year = int(year_str)
+        month = HEBREW_MONTHS.index(month_name) + 1
+    except (ValueError, IndexError):
+        return
+
+    today = date.today()
+    is_future = (year, month) > (today.year, today.month)
+    is_implausibly_old = year < _MIN_PLAUSIBLE_YEAR
+    if not (is_future or is_implausibly_old):
+        return
+
+    reason = "עתידי" if is_future else "ישן מדי"
+    note = f"תאריך לא סביר ({reason}): {month_name} {year}"
+    record["confidence"] = "נמוכה"
+    record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
+
+
 def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
     """Sends one already-loaded page image to Claude and returns its
     extracted fields. The single-page core that both a plain image file and
@@ -200,7 +264,13 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
     record = {name: str(tool_use.input.get(name, "") or "").strip() for name, *_ in FIELD_DEFS}
     _flag_out_of_list_values(record)
     record["year"], record["month"] = derive_year_month(record["date"])
+    _flag_unreasonable_date(record)
     _enforce_core_field_confidence(record)
+    # Not an EXCEL_COLUMNS field - excel_writer.py's row-writing only reads
+    # keys it knows about, so this rides along harmlessly for callers (like
+    # main.py's CLI) that never look at it. streamlit_app.py uses it to show
+    # the original page next to a row for quick manual correction.
+    record["_page_image_jpeg"] = jpeg_bytes
     return record
 
 

@@ -3,9 +3,15 @@ deployed to Streamlit Community Cloud (see README.md).
 
 An alternative front end alongside main.py's CLI, not a replacement for it:
 upload files here (drag-and-drop) instead of dropping them into input/, and
-get the same output/ריכוז_תעודות.xlsx - built through the identical
-app.pipeline.process_files() the CLI uses, so the two front ends can never
-disagree on how a certificate is read or how a bad file is handled.
+get an Excel file built through the identical app.pipeline.process_files()
+the CLI uses, so the two front ends can never disagree on how a certificate
+is read or how a bad file is handled.
+
+Each *project* here is its own separate Excel file under output/, explicitly
+named by the user - see the "Session state model" comment below for exactly
+how a project's file grows without ever silently overwriting another one's
+data or losing anything already saved. main.py's CLI is unaffected by this -
+it still always writes the one fixed output/ריכוז_תעודות.xlsx.
 
 Gated behind a single shared password (see _check_password() below) - never
 hardcoded, always read from st.secrets["APP_PASSWORD"].
@@ -13,23 +19,48 @@ hardcoded, always read from st.secrets["APP_PASSWORD"].
 Run with:
     streamlit run streamlit_app.py
 """
+import re
 import tempfile
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from app import config
-from app.excel_writer import parse_quantity, read_existing_records, write_records
-from app.fields import EXCEL_COLUMNS
+from app.excel_writer import parse_quantity, read_existing_records, sort_by_confidence, write_records
+from app.fields import CONFIDENCE_LEVELS, EXCEL_COLUMNS, HEBREW_MONTHS, REGIONS, WASTE_TYPES
 from app.pipeline import process_files
 
-_OUTPUT_PATH = config.OUTPUT_DIR / config.OUTPUT_FILENAME
 _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
 # Matches the row-fill colors excel_writer.py uses for these same confidence
 # levels in the downloaded file, so the on-screen table and the spreadsheet
 # always agree visually.
 _ROW_COLORS = {"נמוכה": "#FFC7CE", "בינונית": "#FFEB9C"}
+
+
+def _default_project_name() -> str:
+    return f"פרויקט {date.today():%d-%m-%Y}"
+
+
+def _sanitize_filename_part(text: str) -> str:
+    """Strips characters that are illegal (or awkward) in a filename and
+    collapses whitespace to underscores, so a free-text project name can't
+    produce a broken path. Never returns an empty string.
+    """
+    cleaned = re.sub(r'[\\/:*?"<>|]', "", text).strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned or "פרויקט"
+
+
+def _build_output_path(project_name: str) -> Path:
+    """Every project gets its own file: ריכוז_תעודות_<project>_<date>.xlsx.
+    The date is always today's (when the project is activated), independent
+    of whatever the project name itself contains - see _activate_project().
+    """
+    safe_name = _sanitize_filename_part(project_name)
+    return config.OUTPUT_DIR / f"ריכוז_תעודות_{safe_name}_{date.today():%d-%m-%Y}.xlsx"
+
 
 st.set_page_config(
     page_title="מערכת ריכוז תעודות פינוי",
@@ -85,19 +116,70 @@ def _check_password() -> bool:
 if not _check_password():
     st.stop()
 
+# --- Session state model ---------------------------------------------------
+# Each project is its own separate Excel file - explicit, user-named, never
+# mixed with another project's data (see requirements this implements: a
+# project name field, and a clear "add more to this project" vs. "start a
+# new project" choice after processing). Two lists per active project, same
+# reasoning as the previous single-file design (a session must never show a
+# previous project's data by default, but nothing already written to disk
+# may ever be lost):
+#
+#   baseline_records - whatever's already on the active project's specific
+#     file when it's first activated this session. Normally empty (a
+#     project's filename is freshly built from its name + today's date), but
+#     if the exact same project name is reused the same day, this safely
+#     extends that file instead of silently overwriting it.
+#   records - certificates *this session* has processed into the active
+#     project since it was activated (by the first "עבד תעודות" click after
+#     naming it) or since "התחל פרויקט חדש" was last clicked.
+#
+# Invariant kept true on every single write: file content == baseline_records
+# + records. output_path is None until a project is activated - see the
+# process-button handling below, and "התחל פרויקט חדש" for how it's cleared
+# (never deleting the file that project already wrote - just detaching this
+# session's memory from it, per the requirement that old projects stay on
+# disk as history).
 if "records" not in st.session_state:
-    # Seed from whatever's already in the output file (from an earlier
-    # browser session, or from main.py's CLI) so this session's first "עבד
-    # תעודות" click extends that history instead of silently overwriting it.
-    st.session_state.records = read_existing_records(_OUTPUT_PATH)
+    st.session_state.records = []
+if "baseline_records" not in st.session_state:
+    st.session_state.baseline_records = []
+if "output_path" not in st.session_state:
+    st.session_state.output_path = None
+if "active_project_name" not in st.session_state:
+    st.session_state.active_project_name = None
+if "uploader_key_suffix" not in st.session_state:
+    st.session_state.uploader_key_suffix = 0
+if "project_name_key_suffix" not in st.session_state:
+    st.session_state.project_name_key_suffix = 0
+if "just_completed" not in st.session_state:
+    st.session_state.just_completed = False
 
 st.title(":material/recycling: מערכת ריכוז תעודות פינוי", text_alignment="right")
 st.caption("העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.")
 
 # Reserved now, filled in after the upload/processing section below, so the
-# summary always reflects this run's results while still rendering at the top.
+# summary always reflects the active project's file while still rendering at the top.
 summary_slot = st.container()
 st.divider()
+
+if st.session_state.output_path is None:
+    # No project activated yet this session - the name is still editable.
+    # It "locks in" (see below) the moment the first processing run starts.
+    project_name_input = st.text_input(
+        "שם פרויקט",
+        value=_default_project_name(),
+        key=f"project_name_{st.session_state.project_name_key_suffix}",
+        help='כל פרויקט נשמר לקובץ Excel נפרד משלו. השם ננעל עם לחיצת "עבד תעודות" הראשונה.',
+    )
+else:
+    # Locked - shown read-only so it's clear editing it now wouldn't do
+    # anything (renaming an already-written file mid-session isn't supported).
+    st.caption(
+        f":material/folder_open: **פרויקט פעיל:** {st.session_state.active_project_name} "
+        f"&nbsp;·&nbsp; קובץ: `{st.session_state.output_path.name}`"
+    )
+    project_name_input = st.session_state.active_project_name
 
 allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS)
 uploaded_files = st.file_uploader(
@@ -105,6 +187,10 @@ uploaded_files = st.file_uploader(
     type=allowed_types,
     accept_multiple_files=True,
     help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}",
+    # Suffix bumped by "התחל פרויקט חדש" below - Streamlit treats a widget
+    # with a new key as a brand-new, empty instance, which is the standard
+    # way to force-clear a file_uploader's selection programmatically.
+    key=f"uploader_{st.session_state.uploader_key_suffix}",
 )
 
 process_clicked = st.button(
@@ -122,6 +208,16 @@ if process_clicked:
             icon=":material/error:",
         )
     else:
+        if st.session_state.output_path is None:
+            # First processing run of a fresh session/project: lock in the
+            # name typed above and build this project's dedicated file path.
+            # read_existing_records() here (not []) is what makes reusing an
+            # existing project name safe instead of an overwrite hazard.
+            chosen_name = (project_name_input or "").strip() or _default_project_name()
+            st.session_state.active_project_name = chosen_name
+            st.session_state.output_path = _build_output_path(chosen_name)
+            st.session_state.baseline_records = read_existing_records(st.session_state.output_path)
+
         errors = []
 
         def on_error(path, exc):
@@ -141,31 +237,79 @@ if process_clicked:
                 new_records = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
 
             # process_files() always returns "quantity" as a raw string (like
-            # every other extracted field); read_existing_records() returns it as
-            # a float for cells write_records() already parsed. Left alone,
-            # extending session_state.records mixes both types in the same
-            # column - pandas/pyarrow can't serialize that for st.table and
-            # falls back to a broken, unformatted display. Parse it the same
-            # way write_records() will anyway, so the type is consistent from
-            # here on regardless of which path a record came from.
+            # every other extracted field); the numeric column downstream
+            # (the editable table, the Excel cell) needs a clean float-or-""
+            # invariant instead. Parse it the same way write_records() will
+            # anyway, so the type is consistent from here on.
             for record in new_records:
-                parsed_qty = parse_quantity(record.get("quantity", ""))
-                record["quantity"] = parsed_qty if parsed_qty is not None else record.get("quantity", "")
+                raw_qty = record.get("quantity", "")
+                parsed_qty = parse_quantity(raw_qty)
+                if parsed_qty is not None:
+                    record["quantity"] = parsed_qty
+                elif raw_qty:
+                    # The model is instructed to return quantity as digits
+                    # only (or blank) - a non-empty value that still doesn't
+                    # parse means it ignored that instruction. Don't just
+                    # blank it silently: note what it actually said, then
+                    # blank it, so nothing is lost.
+                    note = f"כמות לא תקינה: {raw_qty}"
+                    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+                    record["quantity"] = ""
+                else:
+                    record["quantity"] = ""
 
             st.session_state.records.extend(new_records)
-            write_records(st.session_state.records, _OUTPUT_PATH)
+            # Keep the in-memory order matching what write_records() below is
+            # about to produce on disk (נמוכה first) - otherwise downloading
+            # right after processing would reorder rows relative to what was
+            # just shown on screen, which reads as if the download lost/
+            # scrambled something.
+            st.session_state.records[:] = sort_by_confidence(st.session_state.records)
+            # baseline_records + records, always - see the session-state-model
+            # comment near the top of this file. Never write records alone;
+            # that would overwrite this project's file with only this
+            # session's own batch and silently drop whatever was already in it.
+            write_records(
+                st.session_state.baseline_records + st.session_state.records,
+                st.session_state.output_path,
+            )
             status.update(label=f"הושלם - עובדו {len(new_records)} תעודות חדשות", state="complete")
+            st.session_state.just_completed = True
 
         for filename, error in errors:
             st.warning(f"שגיאה בעיבוד {filename}: {error}", icon=":material/warning:")
 
-# --- Quick summary (rendered into the slot reserved above the upload area) ---
-total_certs = len(st.session_state.records)
-flagged_certs = sum(1 for r in st.session_state.records if r.get("confidence") in _FLAGGED_LEVELS)
-with summary_slot:
-    with st.container(horizontal=True, horizontal_alignment="right"):
-        st.metric('סה"כ תעודות בקובץ', total_certs)
-        st.metric("מסומנות לבדיקה ידנית", flagged_certs)
+# --- Explicit "what next" choice, right after a batch finishes -------------
+if st.session_state.just_completed and st.session_state.records:
+    st.success(
+        f'העיבוד הושלם ונשמר בקובץ "{st.session_state.output_path.name}". מה ברצונך לעשות?',
+        icon=":material/check_circle:",
+    )
+    with st.container(horizontal=True):
+        add_more_clicked = st.button(
+            "הוסף עוד תעודות לפרויקט הזה", icon=":material/add:", type="primary"
+        )
+        new_project_clicked = st.button(
+            "התחל פרויקט חדש", icon=":material/create_new_folder:", type="secondary"
+        )
+    if add_more_clicked:
+        # Nothing about the active project changes - just dismiss this
+        # banner so the uploader above is ready for the next batch.
+        st.session_state.just_completed = False
+        st.rerun()
+    if new_project_clicked:
+        # The just-finished project is already safely written to its own
+        # file (every processing run writes immediately - see above), so
+        # starting fresh only needs to detach this session's memory from it,
+        # never a fold-forward like the old single-shared-file design had.
+        st.session_state.records = []
+        st.session_state.baseline_records = []
+        st.session_state.output_path = None
+        st.session_state.active_project_name = None
+        st.session_state.just_completed = False
+        st.session_state.uploader_key_suffix += 1
+        st.session_state.project_name_key_suffix += 1
+        st.rerun()
 
 # --- Live results table + Excel download ---------------------------------
 st.divider()
@@ -173,42 +317,155 @@ st.subheader("תוצאות", text_alignment="right")
 
 if not st.session_state.records:
     st.info(
-        'טרם עובדו תעודות. גררו קבצים לתיבת ההעלאה למעלה ולחצו על "עבד תעודות".',
+        'טרם עובדו תעודות בפרויקט זה. תנו שם לפרויקט למעלה (או השאירו את ברירת '
+        'המחדל), גררו קבצים לתיבת ההעלאה ולחצו על "עבד תעודות".',
         icon=":material/info:",
     )
+    with summary_slot:
+        with st.container(horizontal=True, horizontal_alignment="right"):
+            st.metric('סה"כ תעודות בפרויקט', 0)
+            st.metric("מסומנות לבדיקה ידנית", 0)
 else:
     header_by_key = dict(EXCEL_COLUMNS)
     keys = [key for key, _label in EXCEL_COLUMNS]
-    df = pd.DataFrame(st.session_state.records, columns=keys).rename(columns=header_by_key)
 
-    def _highlight_row(row):
+    filter_choice = st.segmented_control(
+        "הצג",
+        options=["הכל", "נמוכה ובינונית", "רק נמוכה"],
+        default="הכל",
+        required=True,
+        label_visibility="collapsed",
+    )
+    _levels_by_filter = {
+        "הכל": set(CONFIDENCE_LEVELS),
+        "נמוכה ובינונית": {"נמוכה", "בינונית"},
+        "רק נמוכה": {"נמוכה"},
+    }
+    visible_levels = _levels_by_filter.get(filter_choice, set(CONFIDENCE_LEVELS))
+    filtered_indices = [
+        i for i, r in enumerate(st.session_state.records) if r.get("confidence") in visible_levels
+    ]
+    visible_records = [st.session_state.records[i] for i in filtered_indices]
+
+    def _selectbox_options(closed_list, current_values):
+        # Always offer the closed list, plus any value already present in the
+        # visible rows that isn't on it. _flag_out_of_list_values() (in
+        # extractor.py) deliberately *keeps* an out-of-list waste_type/region
+        # on the record instead of blanking it, precisely so a reviewer can
+        # see what the model actually returned - constraining the dropdown to
+        # only the closed list would silently discard that value the moment
+        # this table renders, undoing that.
+        extra = sorted({v for v in current_values if v and v not in closed_list})
+        return [""] + list(closed_list) + extra
+
+    # __idx__ carries each row's position in st.session_state.records through
+    # the editor and back - hidden from view via column_config below, but
+    # still round-trips in the returned data (per st.column_config's own
+    # "hides from the UI, data still there" behavior). Matching edits back by
+    # this explicit id, rather than by row position, means the merge below
+    # stays correct even if a future Streamlit version adds interactive
+    # sorting to st.data_editor.
+    rows = [{**{k: r.get(k, "") for k in keys}, "__idx__": i} for i, r in zip(filtered_indices, visible_records)]
+    df = pd.DataFrame(rows, columns=keys + ["__idx__"])
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    df = df.rename(columns=header_by_key)
+
+    def _highlight_source_cell(row):
+        # Pandas Styler styles only survive on non-editable columns in
+        # st.data_editor (documented behavior) - "קובץ מקור" is disabled
+        # below anyway (editing it would break its role as the row's link
+        # back to the original file), which happens to be exactly the one
+        # column this can still color.
         color = _ROW_COLORS.get(row["רמת ביטחון"])
-        return [f"background-color: {color}" if color else "" for _ in row]
+        return [
+            f"background-color: {color}" if (color and col == "קובץ מקור") else "" for col in row.index
+        ]
 
-    def _format_quantity(value):
-        # Mirrors excel_writer.py's "#,##0.##" number format: thousands
-        # separator, up to 2 decimals, no trailing zeros. Blank/unparseable
-        # values become "" rather than passing the raw value through.
-        if isinstance(value, (int, float)):
-            return f"{value:,.2f}".rstrip("0").rstrip(".")
-        return "" if value in (None, "") else str(value)
+    styled = df.style.apply(_highlight_source_cell, axis=1)
 
-    # Applied eagerly (not via Styler.format) so the column ends up uniformly
-    # str, not a mix of float and str/None - a mixed-type object column is
-    # exactly what breaks st.table's Arrow serialization the moment a batch
-    # includes both an already-parsed quantity (from a prior run) and a blank
-    # or unparseable one (a record missing this core field is common and
-    # expected, not an edge case) sitting in the same column.
-    df["כמות"] = df["כמות"].map(_format_quantity)
+    edited_df = st.data_editor(
+        styled,
+        key="results_editor",
+        hide_index=True,
+        column_config={
+            "__idx__": None,
+            "קובץ מקור": st.column_config.TextColumn(disabled=True),
+            "כמות": st.column_config.NumberColumn(format="%,.2f"),
+            "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
+            "סוג הפסולת": st.column_config.SelectboxColumn(
+                options=_selectbox_options(WASTE_TYPES, (r.get("waste_type") for r in visible_records))
+            ),
+            "מרחב": st.column_config.SelectboxColumn(
+                options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
+            ),
+            "חודש": st.column_config.SelectboxColumn(
+                options=_selectbox_options(HEBREW_MONTHS, (r.get("month") for r in visible_records))
+            ),
+        },
+    )
 
-    styled = df.style.apply(_highlight_row, axis=1)
-    st.table(styled, hide_index=True)
+    # Merge edits back into session_state.records by __idx__, then keep the
+    # file in sync with whatever's now on screen - every rerun, not just
+    # ones an edit triggered, since that's simpler and correct either way
+    # (a no-op write when nothing actually changed) rather than trying to
+    # detect which reruns need it.
+    for _, edited_row in edited_df.iterrows():
+        target = st.session_state.records[int(edited_row["__idx__"])]
+        for key in keys:
+            value = edited_row.get(header_by_key[key])
+            if key == "quantity":
+                target[key] = "" if pd.isna(value) else float(value)
+            else:
+                target[key] = "" if value is None else value
+
+    st.session_state.records[:] = sort_by_confidence(st.session_state.records)
+    # baseline_records + records, same as after processing above - an edit
+    # here must not overwrite the project's file with only what's on screen.
+    all_records = st.session_state.baseline_records + st.session_state.records
+    write_records(all_records, st.session_state.output_path)
+
+    with summary_slot:
+        with st.container(horizontal=True, horizontal_alignment="right"):
+            st.metric('סה"כ תעודות בפרויקט', len(all_records))
+            st.metric(
+                "מסומנות לבדיקה ידנית",
+                sum(1 for r in all_records if r.get("confidence") in _FLAGGED_LEVELS),
+            )
 
     st.download_button(
         "הורדת קובץ Excel",
-        data=_OUTPUT_PATH.read_bytes(),
-        file_name=config.OUTPUT_FILENAME,
+        data=st.session_state.output_path.read_bytes(),
+        file_name=st.session_state.output_path.name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:",
         type="primary",
     )
+
+    # --- Source page viewer, next to the row it came from --------------------
+    st.divider()
+    st.subheader("תצוגת עמוד מקור", text_alignment="right")
+
+    row_labels = [
+        f"{i + 1}. {r.get('source_file', '')} - {r.get('site') or r.get('waste_type') or '(ללא זיהוי)'}"
+        for i, r in enumerate(st.session_state.records)
+    ]
+    selected_label = st.selectbox("בחרו שורה לצפייה בעמוד המקורי", options=row_labels)
+    if selected_label:
+        selected_record = st.session_state.records[row_labels.index(selected_label)]
+        image_bytes = selected_record.get("_page_image_jpeg")
+        image_col, fields_col = st.columns(2)
+        with image_col:
+            if image_bytes:
+                try:
+                    st.image(image_bytes)
+                except Exception:
+                    st.warning("לא ניתן להציג את התמונה השמורה לשורה זו.", icon=":material/warning:")
+            else:
+                st.info(
+                    "אין תמונה שמורה לשורה זו - היא עובדה בהרצה קודמת של השרת "
+                    "(תמונות נשמרות רק בזיכרון, לאורך ההרצה הנוכחית בלבד).",
+                    icon=":material/info:",
+                )
+        with fields_col:
+            for key, label in EXCEL_COLUMNS:
+                st.write(f"**{label}:** {selected_record.get(key) or '—'}")
