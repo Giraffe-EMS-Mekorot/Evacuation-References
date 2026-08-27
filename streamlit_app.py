@@ -37,6 +37,13 @@ _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
 # levels in the downloaded file, so the on-screen table and the spreadsheet
 # always agree visually.
 _ROW_COLORS = {"נמוכה": "#FFC7CE", "בינונית": "#FFEB9C"}
+_LOGO_PATH = Path(__file__).resolve().parent / "logo.jpg"
+# The upload area's accent border/background, per the design request - not
+# in .streamlit/config.toml because there's no theme token for "this one
+# specific widget's background"; see the CSS block below for why this
+# targets the file_uploader by its key rather than a fixed selector.
+_UPLOAD_AREA_BORDER = "#A47E5B"
+_UPLOAD_AREA_BACKGROUND = "#F3EADC"
 
 
 def _default_project_name() -> str:
@@ -70,9 +77,26 @@ st.set_page_config(
 
 # Streamlit has no built-in RTL layout mode; this is the minimal CSS needed to
 # mirror the app right-to-left for Hebrew. This is a functional requirement,
-# not decorative styling - all actual visual theming (colors, fonts, radius)
-# lives in .streamlit/config.toml instead, per Streamlit's native theming.
-st.html("<style>.stApp, .stApp * { direction: rtl; }</style>")
+# not decorative styling.
+#
+# The second rule (upload area background/border) is the one deliberately
+# decorative piece of custom CSS in this file - there's no config.toml theme
+# token for "this one specific widget's background", so per the design
+# request it's done here instead, targeted at the file_uploader's own key
+# rather than a generic selector that would also repaint every other widget.
+# The key's numeric suffix changes (see uploader_key_suffix elsewhere in this
+# file - it resets the widget when starting a new project), so this matches
+# on it as a substring, not an exact class name, to keep matching regardless
+# of which suffix is currently active.
+st.html(f"""<style>
+.stApp, .stApp * {{ direction: rtl; }}
+div[class*="st-key-uploader_"] {{
+    background-color: {_UPLOAD_AREA_BACKGROUND};
+    border: 2px dashed {_UPLOAD_AREA_BORDER};
+    border-radius: 8px;
+    padding: 0.75rem;
+}}
+</style>""")
 
 
 def _check_password() -> bool:
@@ -97,7 +121,9 @@ def _check_password() -> bool:
 
     _, center, _ = st.columns([1, 2, 1])
     with center:
-        st.title(":material/lock: מערכת ריכוז תעודות פינוי", text_alignment="right")
+        if _LOGO_PATH.is_file():
+            st.image(str(_LOGO_PATH), width=100)
+        st.title(":material/lock: :green[מערכת ריכוז תעודות פינוי]", text_alignment="right")
         with st.form("login_form", border=True):
             entered_password = st.text_input("סיסמה", type="password")
             submitted = st.form_submit_button(
@@ -155,8 +181,16 @@ if "project_name_key_suffix" not in st.session_state:
 if "just_completed" not in st.session_state:
     st.session_state.just_completed = False
 
-st.title(":material/recycling: מערכת ריכוז תעודות פינוי", text_alignment="right")
-st.caption("העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.")
+# Logo defined first so it lands on the visual right under the page's RTL
+# direction (see the RTL CSS above) - the natural "branding at the reading
+# start" position for a Hebrew header, with the title flowing to its left.
+logo_col, title_col = st.columns([1, 5], vertical_alignment="center")
+with logo_col:
+    if _LOGO_PATH.is_file():
+        st.image(str(_LOGO_PATH), width=100)
+with title_col:
+    st.title(":material/recycling: :green[מערכת ריכוז תעודות פינוי]", text_alignment="right")
+st.caption(":gray[העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.]")
 
 # Reserved now, filled in after the upload/processing section below, so the
 # summary always reflects the active project's file while still rendering at the top.

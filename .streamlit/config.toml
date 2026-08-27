@@ -1,14 +1,14 @@
-# Calm, professional blue/gray theme for the certificate-consolidation web UI.
+# Deep forest green + earthy gold-brown + warm cream theme (company palette).
 # font = "sans-serif" (a built-in option, not a Google Fonts URL) so the app
 # renders correctly even on an office network with no internet access.
 [theme]
 base = "light"
-primaryColor = "#2E5A8C"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F2F5F8"
-textColor = "#1F2933"
-linkColor = "#2E5A8C"
-borderColor = "#D6DEE7"
+primaryColor = "#1B4332"
+backgroundColor = "#FAF7F0"
+secondaryBackgroundColor = "#F0EBE0"
+textColor = "#1A1A1A"
+linkColor = "#8B6F47"
+borderColor = "#D9CCB8"
 font = "sans-serif"
 baseRadius = "8px"
 buttonRadius = "8px"
@@ -16,8 +16,18 @@ showWidgetBorder = true
 
 redColor = "#C0392B"
 yellowColor = "#B7860B"
-greenColor = "#2E7D46"
-grayColor = "#5B6672"
+# Reused by streamlit_app.py's title (":green[...]" markdown) and caption
+# (":gray[...]") so both pick up the brand palette through Streamlit's own
+# color tokens instead of custom CSS - greenColor matches primaryColor
+# exactly (the requested title color), grayColor is repurposed as the
+# gold-brown accent (the requested subtitle tone), not an actual gray.
+greenColor = "#1B4332"
+grayColor = "#8B6F47"
 
-dataframeBorderColor = "#D6DEE7"
-dataframeHeaderBackgroundColor = "#F2F5F8"
+dataframeBorderColor = "#D9CCB8"
+dataframeHeaderBackgroundColor = "#F0EBE0"
+
+# Bigger, bolder h1 (st.title) per the design request - other levels nudged
+# up slightly too for a consistent scale, not just the title in isolation.
+headingFontSizes = ["44px", "28px", "22px", "18px", "16px", "14px"]
+headingFontWeights = [800, 700, 600, 600, 600, 600]
