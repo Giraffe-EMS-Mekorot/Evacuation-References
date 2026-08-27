@@ -27,6 +27,17 @@ WASTE_TYPES = [
     "מתכות",
 ]
 
+# The explicit "none of the above fit" value the model is instructed to
+# return for waste_type instead of guessing or leaving it blank - see
+# FIELD_DEFS below. Deliberately NOT a member of WASTE_TYPES itself (it's not
+# a real waste category), and deliberately NOT added as a named row in
+# excel_writer.py's summary-sheet pivot: that sheet's existing "לא מסווג / לא
+# מזוהה" catch-all row is pure arithmetic (total minus the known types) and
+# already captures any waste_type that isn't one of the 9 real ones,
+# regardless of whether the cell is blank, this exact sentinel, or something
+# else entirely - see excel_writer.py's own note on why that's deliberate.
+UNCLASSIFIED_WASTE_TYPE = "לא מסווג/לא מזוהה"
+
 REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
 CONFIDENCE_LEVELS = ["גבוהה", "בינונית", "נמוכה"]
@@ -57,15 +68,21 @@ FIELD_DEFS = [
         "waste_type",
         "סוג הפסולת - יש לבחור אך ורק מתוך הרשימה הסגורה: "
         + ", ".join(WASTE_TYPES)
-        + ". התאם קטגוריה רק אם סוג הפריט כתוב או מתואר במפורש בתעודה עצמה בצורה "
-        + "התואמת ישירות לאחת מהאפשרויות. אל תסווג לפי שם הקובץ, סוג העסק המנפיק, "
-        + "או ניחוש כללי מהקשר - אם הפריט לא תואם באופן ישיר וברור לאף אחת "
-        + "מהאפשרויות, השאר ריק.",
+        + f", או '{UNCLASSIFIED_WASTE_TYPE}'. התאם קטגוריה מהרשימה רק אם סוג הפריט "
+        + "כתוב או מתואר במפורש בתעודה עצמה בצורה התואמת ישירות לאחת מהאפשרויות. "
+        + "אל תסווג לפי שם הקובץ, סוג העסק המנפיק, או ניחוש כללי מהקשר. אם הפריט "
+        + f"לא תואם באופן ישיר וברור לאף אחת מהאפשרויות - אל תשאיר ריק, החזר '{UNCLASSIFIED_WASTE_TYPE}' "
+        + "ותאר בשדה ההערות במדויק את התיאור המקורי כפי שהוא מופיע בתעודה (למשל: "
+        + "\"בתעודה נכתב 'סוללות'\") כדי שאפשר יהיה לשקול הוספת קטגוריה חדשה בעתיד.",
         "string",
     ),
     (
         "quantity",
-        "הכמות, מספר בלבד (ללא יחידת מידה), למשל 12.5. אם לא ניתן לזהות - השאר ריק.",
+        "הכמות, מספר בלבד (ללא יחידת מידה), למשל 12.5. זהו השדה הכי קריטי לדיוק "
+        "בכל התעודה - לפני שאתה קובע את הערך הסופי, קרא כל ספרה בנפרד ובדוק אותה "
+        "פעם שנייה (בפרט ספרות שקל להתבלבל ביניהן בכתב יד: 0/6/8, 1/7, 3/8, 4/9), "
+        "וודא שמיקום הנקודה העשרונית ומספר הספרות תואמים בדיוק את מה שכתוב "
+        "בתעודה. אם לא ניתן לזהות בביטחון - השאר ריק ואל תנחש.",
         "string",
     ),
     (
@@ -112,6 +129,7 @@ FIELD_DEFS = [
         "string",
     ),
 ]
+
 
 def empty_record(filename: str = "", error: str = "") -> dict:
     """Builds a placeholder record matching FIELD_DEFS's shape, for a file or

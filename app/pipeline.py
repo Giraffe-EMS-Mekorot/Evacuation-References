@@ -10,10 +10,11 @@ from typing import Callable, List, Optional
 import anthropic
 
 from . import config
-from .excel_writer import read_existing_records
+from .excel_writer import parse_quantity, read_existing_records
 from .extractor import extract_certificate_pages
 from .fields import empty_record
 from .normalize import NameNormalizer
+from .quantity_check import build_quantity_history, flag_quantity_outlier
 
 # Called as on_progress(index, total, path) right before each file is sent to
 # the model - lets a caller (CLI print, Streamlit status widget) show progress
@@ -40,14 +41,17 @@ def process_files(
     the exception text in its notes, and processing continues with the rest.
 
     Also runs each record's free-text name fields (site/reference_type)
-    through NameNormalizer, bootstrapped from whatever's already in
-    output/ריכוז_תעודות.xlsx - see app/normalize.py. This applies uniformly
-    to both the CLI and the Streamlit UI, since both call this function.
+    through NameNormalizer, and its quantity through a historical-outlier
+    sanity check - both bootstrapped from whatever's already in
+    output/ריכוז_תעודות.xlsx (see app/normalize.py and app/quantity_check.py).
+    This applies uniformly to both the CLI and the Streamlit UI, since both
+    call this function.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    normalizer = NameNormalizer.build_from_records(
-        read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
-    )
+    existing_records = read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
+    normalizer = NameNormalizer.build_from_records(existing_records)
+    quantity_history = build_quantity_history(existing_records)
+
     records = []
     total = len(paths)
     for index, path in enumerate(paths, start=1):
@@ -61,5 +65,13 @@ def process_files(
             page_records = [empty_record(path.name, str(exc))]
         for record in page_records:
             normalizer.normalize(record)
+            # quantity is still the raw extractor string here - parsed just
+            # for this comparison, not written back, so every caller keeps
+            # seeing the same raw-string-or-empty value they always have
+            # (main.py's CLI never parses it in memory at all; write_records()
+            # does that itself at Excel-write time).
+            parsed_qty = parse_quantity(record.get("quantity"))
+            if parsed_qty is not None:
+                flag_quantity_outlier(record, parsed_qty, quantity_history)
         records.extend(page_records)
     return records

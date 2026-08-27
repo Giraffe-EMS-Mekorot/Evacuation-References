@@ -28,13 +28,15 @@ from typing import Dict, List
 
 from rapidfuzz import fuzz, process, utils
 
-# Below this score (0-100, from fuzz.WRatio), two names are treated as
-# genuinely different - not spelling/formatting variants of the same one.
-# 85 is the threshold suggested in the spec for this feature; matches like
-# "veridis ltd"/"VERIDIS" (90) or a missing gershayim in a Hebrew ח.פ. suffix
-# (95+) clear it comfortably, while genuinely different names score well
-# below it (see the module docstring's tests, or app/pipeline.py's caller).
-_SIMILARITY_THRESHOLD = 85
+# At or above this score (0-100, from fuzz.WRatio), a name is treated as an
+# OCR/handwriting variant of an already-known one and silently normalized to
+# it - matches like "veridis ltd"/"VERIDIS" (90) or a missing gershayim in a
+# Hebrew ח.פ. suffix (95+) clear it comfortably. Below it, a name is treated
+# as a genuinely new supplier/site rather than illegible handwriting of a
+# known one - see normalize()'s two distinct notes for these cases. 70, not a
+# stricter value, because the whole point of this lower band is to still
+# catch real OCR noise, just noisier than the once-85-only cases were.
+_SIMILARITY_THRESHOLD = 70
 
 # Which extracted fields get normalized against a running "known names"
 # list. Both are free text with no closed list (unlike waste_type/region -
@@ -71,13 +73,23 @@ class NameNormalizer:
             known.append(value)
 
     def normalize(self, record: dict) -> None:
-        """Normalizes record's free-text name fields in place. Whenever a
-        value is close enough to an already-known one, it's rewritten to
-        that canonical spelling and a "נורמל מ-X" note is appended (X being
-        what the model actually returned) so the correction stays visible,
-        not silent. A value with no close match is kept as its own spelling
-        and remembered, so later records in the same batch that are close to
-        *it* normalize to it in turn.
+        """Normalizes record's free-text name fields in place. Three cases,
+        each noted distinctly rather than lumped together:
+
+          - Close match, different spelling (score >= _SIMILARITY_THRESHOLD,
+            not identical): treated as the same real-world site/supplier read
+            with OCR/handwriting noise - rewritten to the known spelling,
+            with a "נורמל מ-X" note (X being what the model actually
+            returned) so the correction stays visible, not silent.
+          - Close match, identical spelling: already exactly a known value -
+            nothing to note.
+          - No close match at all: treated as a genuinely new site/supplier,
+            *not* illegible handwriting of a known one - noted as such
+            explicitly (distinct from "כתב יד לא קריא", which is the model's
+            own call about legibility, not this system-level "is this even
+            in our history" check) and remembered, so a later record in the
+            same batch that's close to *this* new spelling normalizes to it
+            in turn instead of also being flagged as new.
         """
         for field in NORMALIZED_FIELDS:
             value = (record.get(field) or "").strip()
@@ -89,10 +101,14 @@ class NameNormalizer:
                 if known
                 else None
             )
-            if match is not None and match[1] >= _SIMILARITY_THRESHOLD and match[0] != value:
+            if match is not None and match[1] >= _SIMILARITY_THRESHOLD:
                 canonical = match[0]
-                note = f'נורמל מ-"{value}"'
+                if canonical != value:
+                    note = f'נורמל מ-"{value}"'
+                    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+                    record[field] = canonical
+                    value = canonical  # don't also remember the raw spelling as a new "known" name
+            else:
+                note = "ספק/אתר חדש - לא קיים ברשימת הייחוס"
                 record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
-                record[field] = canonical
-                value = canonical  # don't also remember the raw spelling as a new "known" name
             self._remember(field, value)

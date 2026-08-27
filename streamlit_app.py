@@ -29,7 +29,7 @@ import streamlit as st
 
 from app import config
 from app.excel_writer import parse_quantity, read_existing_records, sort_by_confidence, write_records
-from app.fields import CONFIDENCE_LEVELS, EXCEL_COLUMNS, HEBREW_MONTHS, REGIONS, WASTE_TYPES
+from app.fields import CONFIDENCE_LEVELS, EXCEL_COLUMNS, HEBREW_MONTHS, REGIONS, UNCLASSIFIED_WASTE_TYPE, WASTE_TYPES
 from app.pipeline import process_files
 
 _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
@@ -427,7 +427,9 @@ else:
             "כמות": st.column_config.NumberColumn(format="%,.2f"),
             "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
             "סוג הפסולת": st.column_config.SelectboxColumn(
-                options=_selectbox_options(WASTE_TYPES, (r.get("waste_type") for r in visible_records))
+                options=_selectbox_options(
+                    WASTE_TYPES + [UNCLASSIFIED_WASTE_TYPE], (r.get("waste_type") for r in visible_records)
+                )
             ),
             "מרחב": st.column_config.SelectboxColumn(
                 options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))

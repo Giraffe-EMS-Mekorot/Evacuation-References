@@ -28,7 +28,15 @@ from PIL import Image
 
 from . import config
 from .derive import derive_year_month
-from .fields import CONFIDENCE_LEVELS, FIELD_DEFS, HEBREW_MONTHS, REGIONS, WASTE_TYPES, empty_record
+from .fields import (
+    CONFIDENCE_LEVELS,
+    FIELD_DEFS,
+    HEBREW_MONTHS,
+    REGIONS,
+    UNCLASSIFIED_WASTE_TYPE,
+    WASTE_TYPES,
+    empty_record,
+)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
@@ -81,14 +89,22 @@ _SYSTEM_PROMPT = (
     "מלא שדה רק אם הערך שלו כתוב או מופיע בבירור בתעודה עצמה - לא בהסקה מהקשר, "
     "לא משם הקובץ, ולא מדמיון לתעודות אחרות. "
     "אם שדה כלשהו אינו ניתן לזיהוי ודאי, או שמילויו מצריך הסקה/ניחוש - השאר אותו "
-    "כמחרוזת ריקה. שדה ריק תמיד עדיף על ניחוש שגוי. "
-    "כלל אצבע: אם אתה עומד לכתוב בשדה הערות שהערך שמילאת הוא 'הנחה', 'הערכה' או "
-    "'ניחוש' - זהו סימן שהיה עליך להשאיר את השדה עצמו ריק ולתאר את חוסר הוודאות "
-    "רק בהערות, לא למלא אותו. "
+    "כמחרוזת ריקה. שדה ריק תמיד עדיף על ניחוש שגוי. יוצא מן הכלל היחיד הוא "
+    "סוג_הפסולת - ראו את הוראות השדה עצמו: שם אסור להשאיר ריק, ויש להחזיר "
+    f"'{UNCLASSIFIED_WASTE_TYPE}' כשהפריט לא תואם לרשימה הסגורה. "
+    "כלל אצבע לשאר השדות: אם אתה עומד לכתוב בשדה הערות שהערך שמילאת הוא 'הנחה', "
+    "'הערכה' או 'ניחוש' - זהו סימן שהיה עליך להשאיר את השדה עצמו ריק ולתאר את חוסר "
+    "הוודאות רק בהערות, לא למלא אותו. "
+    "לפני שאתה קובע את שדה הכמות הסופי - זהו השדה הכי קריטי לדיוק בתעודה - עבור "
+    "פעם נוספת על כל ספרה שקראת ווודא שלא התבלבלת בין ספרות דומות בכתב יד "
+    "(0/6/8, 1/7, 3/8, 4/9) ושמיקום הנקודה העשרונית נכון; אין צורך לכתוב את תהליך "
+    "הבדיקה הזה בשום שדה - רק לוודא אותו לפני שאתה עונה. "
     "בשדה רמת_ביטחון דווח את הערכתך לגבי איכות הקריאה של התעודה כולה. "
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
-    "מטושטש'. אל תכתוב הסברים ארוכים על מה שעשית או איך הגעת לערך - רק את הבעיה."
+    "מטושטש'. אל תכתוב הסברים ארוכים על מה שעשית או איך הגעת לערך - רק את הבעיה. "
+    f"חריג: כשמחזירים '{UNCLASSIFIED_WASTE_TYPE}' בסוג_הפסולת, כן יש לכתוב בהערות "
+    "את התיאור המקורי המדויק מהתעודה, גם אם זה יותר מ-4-5 מילים."
 )
 
 
@@ -153,9 +169,18 @@ def _encode_image_block(jpeg_bytes: bytes) -> dict:
 
 
 def _flag_out_of_list_values(record: dict) -> None:
-    """Downgrades confidence and appends a note when a closed-list field is out of range."""
+    """Downgrades confidence and appends a note when a closed-list field is out
+    of range. UNCLASSIFIED_WASTE_TYPE is deliberately exempt here - it's the
+    model correctly following instructions (see FIELD_DEFS's waste_type
+    description), not a violation of the closed list; see
+    _flag_unclassified_waste_type() for its own, milder handling.
+    """
     issues = []
-    if record["waste_type"] and record["waste_type"] not in WASTE_TYPES:
+    if (
+        record["waste_type"]
+        and record["waste_type"] != UNCLASSIFIED_WASTE_TYPE
+        and record["waste_type"] not in WASTE_TYPES
+    ):
         issues.append(f"סוג_פסולת לא מזוהה: '{record['waste_type']}'")
     if record["region"] and record["region"] not in REGIONS:
         issues.append(f"מרחב לא מזוהה: '{record['region']}'")
@@ -166,6 +191,28 @@ def _flag_out_of_list_values(record: dict) -> None:
         record["confidence"] = "נמוכה"
         note = "; ".join(issues)
         record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
+
+
+def _flag_unclassified_waste_type(record: dict) -> None:
+    """Ensures a record the model marked UNCLASSIFIED_WASTE_TYPE always
+    surfaces for manual review (to judge whether a new category is needed),
+    even if the model's own רמת_ביטחון claimed "גבוהה" - it read the
+    certificate clearly, it just found nothing in the closed list to match,
+    which is exactly the situation a human should weigh in on.
+
+    Escalates to "בינונית", not "נמוכה" - unlike _flag_out_of_list_values
+    (an actual violation of the closed-list instruction) this is the model
+    correctly following instructions, so it doesn't warrant the same
+    severity as a genuine error; _enforce_core_field_confidence's "already at
+    least בינונית" rows are left alone, matching that function's own pattern.
+    """
+    if record.get("waste_type") != UNCLASSIFIED_WASTE_TYPE:
+        return
+    if record["confidence"] not in ("נמוכה", "בינונית"):
+        record["confidence"] = "בינונית"
+    note = "סוג פסולת לא מסווג - לשקול קטגוריה חדשה"
+    if note not in (record.get("notes") or ""):
+        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
 def _enforce_core_field_confidence(record: dict) -> None:
@@ -263,6 +310,7 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
 
     record = {name: str(tool_use.input.get(name, "") or "").strip() for name, *_ in FIELD_DEFS}
     _flag_out_of_list_values(record)
+    _flag_unclassified_waste_type(record)
     record["year"], record["month"] = derive_year_month(record["date"])
     _flag_unreasonable_date(record)
     _enforce_core_field_confidence(record)
