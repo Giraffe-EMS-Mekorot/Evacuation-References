@@ -1,0 +1,23 @@
+# Calm, professional blue/gray theme for the certificate-consolidation web UI.
+# font = "sans-serif" (a built-in option, not a Google Fonts URL) so the app
+# renders correctly even on an office network with no internet access.
+[theme]
+base = "light"
+primaryColor = "#2E5A8C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F5F8"
+textColor = "#1F2933"
+linkColor = "#2E5A8C"
+borderColor = "#D6DEE7"
+font = "sans-serif"
+baseRadius = "8px"
+buttonRadius = "8px"
+showWidgetBorder = true
+
+redColor = "#C0392B"
+yellowColor = "#B7860B"
+greenColor = "#2E7D46"
+grayColor = "#5B6672"
+
+dataframeBorderColor = "#D6DEE7"
+dataframeHeaderBackgroundColor = "#F2F5F8"
