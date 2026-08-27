@@ -140,8 +140,8 @@ if process_clicked:
 
                 new_records = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
 
-            # extract_certificate() always returns "quantity" as a raw string
-            # (like every other field); read_existing_records() returns it as
+            # process_files() always returns "quantity" as a raw string (like
+            # every other extracted field); read_existing_records() returns it as
             # a float for cells write_records() already parsed. Left alone,
             # extending session_state.records mixes both types in the same
             # column - pandas/pyarrow can't serialize that for st.table and

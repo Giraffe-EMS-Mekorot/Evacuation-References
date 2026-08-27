@@ -113,6 +113,26 @@ FIELD_DEFS = [
     ),
 ]
 
+def empty_record(filename: str = "", error: str = "") -> dict:
+    """Builds a placeholder record matching FIELD_DEFS's shape, for a file or
+    page that couldn't be extracted at all - flagged for manual review rather
+    than silently dropped from the batch.
+
+    Lives here, not in extractor.py or pipeline.py, so both of those modules
+    can build one without importing from each other (extractor.py needs it
+    for a single failed page; pipeline.py needs it for a whole file that
+    couldn't even be opened/split).
+    """
+    record = {name: "" for name, *_ in FIELD_DEFS}
+    record["source_file"] = filename
+    record["year"] = ""
+    record["month"] = ""
+    record["confidence"] = "נמוכה"
+    if error:
+        record["notes"] = f"שגיאת עיבוד: {error}"
+    return record
+
+
 EXCEL_COLUMNS = [
     ("region", "מרחב"),
     ("site", "אתר/יחידה"),
