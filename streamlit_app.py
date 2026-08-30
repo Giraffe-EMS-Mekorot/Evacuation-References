@@ -41,9 +41,23 @@ _LOGO_PATH = Path(__file__).resolve().parent / "logo.jpg"
 # The upload area's accent border/background, per the design request - not
 # in .streamlit/config.toml because there's no theme token for "this one
 # specific widget's background"; see the CSS block below for why this
-# targets the file_uploader by its key rather than a fixed selector.
+# targets the card's own key rather than a fixed/generic selector.
 _UPLOAD_AREA_BORDER = "#A47E5B"
 _UPLOAD_AREA_BACKGROUND = "#F3EADC"
+# A lighter green than primaryColor, for the header's gradient depth - not a
+# theme token (config.toml has no "secondary green" slot), just a plain
+# constant used directly in the CSS block below.
+_ACCENT_GREEN_LIGHT = "#3D6B4F"
+# Matches config.toml's orangeColor - used both there (so Streamlit's own
+# orange-tinted elements pick it up) and here directly, for the one bit of
+# custom CSS that needs the literal value: the high-confidence accent border
+# in the results table (see _highlight_source_cell).
+_ACCENT_GOLD = "#C9982F"
+# Symbols shown in the read-only "status" column next to רמת ביטחון, in
+# addition to (not instead of) that column's own text value and the existing
+# background-fill coloring - a second, non-color signal for the same
+# information, per the design request.
+_STATUS_SYMBOLS = {"גבוהה": "✓", "בינונית": "⚠", "נמוכה": "⚠"}
 
 
 def _default_project_name() -> str:
@@ -75,26 +89,50 @@ st.set_page_config(
     layout="wide",
 )
 
-# Streamlit has no built-in RTL layout mode; this is the minimal CSS needed to
-# mirror the app right-to-left for Hebrew. This is a functional requirement,
-# not decorative styling.
+# Streamlit has no built-in RTL layout mode; the first rule below is the
+# minimal CSS needed to mirror the app right-to-left for Hebrew - a
+# functional requirement, not decorative styling. Everything else in this
+# block IS deliberately decorative (the "card" look, the header gradient),
+# targeted at specific containers' own st.container(key=...) values rather
+# than generic selectors that would repaint unrelated widgets:
 #
-# The second rule (upload area background/border) is the one deliberately
-# decorative piece of custom CSS in this file - there's no config.toml theme
-# token for "this one specific widget's background", so per the design
-# request it's done here instead, targeted at the file_uploader's own key
-# rather than a generic selector that would also repaint every other widget.
-# The key's numeric suffix changes (see uploader_key_suffix elsewhere in this
-# file - it resets the widget when starting a new project), so this matches
-# on it as a substring, not an exact class name, to keep matching regardless
-# of which suffix is currently active.
+#   header_card   - the logo+title+caption banner (both here and in the
+#                   password screen - the two never render in the same
+#                   script run, so reusing one key is safe). Dark gradient
+#                   background needs the title/caption text forced light -
+#                   config.toml's :green[]/:gray[] markdown colors are for
+#                   the plain cream background elsewhere, not readable here.
+#   upload_card / results_card / skipped_card - plain "card" containers:
+#                   distinct background, soft border, subtle shadow. Cheap
+#                   visual separation Streamlit's own border=True can't give
+#                   (it only draws a border in the page's own background).
+#
+# upload_card additionally gets the gold dashed border from the earlier
+# design pass, now on the whole card instead of just the file_uploader
+# widget, since the card itself now visually *is* the upload area.
 st.html(f"""<style>
 .stApp, .stApp * {{ direction: rtl; }}
-div[class*="st-key-uploader_"] {{
-    background-color: {_UPLOAD_AREA_BACKGROUND};
+
+.st-key-header_card {{
+    background: linear-gradient(135deg, {"#1B4332"} 0%, {_ACCENT_GREEN_LIGHT} 100%);
+    border-radius: 16px;
+    padding: 1.25rem 1.75rem;
+    margin-bottom: 0.5rem;
+}}
+.st-key-header_card, .st-key-header_card * {{
+    color: #FAF7F0 !important;
+}}
+
+.st-key-upload_card, .st-key-results_card, .st-key-skipped_card {{
+    background-color: #FFFFFF;
+    border-radius: 14px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 2px 10px rgba(27, 67, 50, 0.08);
+    margin-bottom: 1rem;
+}}
+.st-key-upload_card {{
     border: 2px dashed {_UPLOAD_AREA_BORDER};
-    border-radius: 8px;
-    padding: 0.75rem;
+    background-color: {_UPLOAD_AREA_BACKGROUND};
 }}
 </style>""")
 
@@ -121,9 +159,10 @@ def _check_password() -> bool:
 
     _, center, _ = st.columns([1, 2, 1])
     with center:
-        if _LOGO_PATH.is_file():
-            st.image(str(_LOGO_PATH), width=100)
-        st.title(":material/lock: :green[מערכת ריכוז תעודות פינוי]", text_alignment="right")
+        with st.container(key="header_card"):
+            if _LOGO_PATH.is_file():
+                st.image(str(_LOGO_PATH), width=100)
+            st.title(":material/lock: מערכת ריכוז תעודות פינוי", text_alignment="right")
         with st.form("login_form", border=True):
             entered_password = st.text_input("סיסמה", type="password")
             submitted = st.form_submit_button(
@@ -187,58 +226,63 @@ if "project_name_key_suffix" not in st.session_state:
 if "just_completed" not in st.session_state:
     st.session_state.just_completed = False
 
-# Logo defined first so it lands on the visual right under the page's RTL
-# direction (see the RTL CSS above) - the natural "branding at the reading
-# start" position for a Hebrew header, with the title flowing to its left.
-logo_col, title_col = st.columns([1, 5], vertical_alignment="center")
-with logo_col:
-    if _LOGO_PATH.is_file():
-        st.image(str(_LOGO_PATH), width=100)
-with title_col:
-    st.title(":material/recycling: :green[מערכת ריכוז תעודות פינוי]", text_alignment="right")
-st.caption(":gray[העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.]")
+with st.container(key="header_card"):
+    # Logo defined first so it lands on the visual right under the page's
+    # RTL direction (see the RTL CSS above) - the natural "branding at the
+    # reading start" position for a Hebrew header, with the title flowing to
+    # its left.
+    logo_col, title_col = st.columns([1, 5], vertical_alignment="center")
+    with logo_col:
+        if _LOGO_PATH.is_file():
+            st.image(str(_LOGO_PATH), width=100)
+    with title_col:
+        st.title(":material/recycling: מערכת ריכוז תעודות פינוי", text_alignment="right")
+    st.caption("העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.")
 
 # Reserved now, filled in after the upload/processing section below, so the
 # summary always reflects the active project's file while still rendering at the top.
 summary_slot = st.container()
 st.divider()
 
-if st.session_state.output_path is None:
-    # No project activated yet this session - the name is still editable.
-    # It "locks in" (see below) the moment the first processing run starts.
-    project_name_input = st.text_input(
-        "שם פרויקט",
-        value=_default_project_name(),
-        key=f"project_name_{st.session_state.project_name_key_suffix}",
-        help='כל פרויקט נשמר לקובץ Excel נפרד משלו. השם ננעל עם לחיצת "עבד תעודות" הראשונה.',
-    )
-else:
-    # Locked - shown read-only so it's clear editing it now wouldn't do
-    # anything (renaming an already-written file mid-session isn't supported).
-    st.caption(
-        f":material/folder_open: **פרויקט פעיל:** {st.session_state.active_project_name} "
-        f"&nbsp;·&nbsp; קובץ: `{st.session_state.output_path.name}`"
-    )
-    project_name_input = st.session_state.active_project_name
+with st.container(key="upload_card"):
+    st.subheader(":material/upload_file: העלאת תעודות", text_alignment="right")
 
-allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS)
-uploaded_files = st.file_uploader(
-    "גררו לכאן קובצי תעודות, או לחצו לבחירה",
-    type=allowed_types,
-    accept_multiple_files=True,
-    help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}",
-    # Suffix bumped by "התחל פרויקט חדש" below - Streamlit treats a widget
-    # with a new key as a brand-new, empty instance, which is the standard
-    # way to force-clear a file_uploader's selection programmatically.
-    key=f"uploader_{st.session_state.uploader_key_suffix}",
-)
+    if st.session_state.output_path is None:
+        # No project activated yet this session - the name is still editable.
+        # It "locks in" (see below) the moment the first processing run starts.
+        project_name_input = st.text_input(
+            "שם פרויקט",
+            value=_default_project_name(),
+            key=f"project_name_{st.session_state.project_name_key_suffix}",
+            help='כל פרויקט נשמר לקובץ Excel נפרד משלו. השם ננעל עם לחיצת "עבד תעודות" הראשונה.',
+        )
+    else:
+        # Locked - shown read-only so it's clear editing it now wouldn't do
+        # anything (renaming an already-written file mid-session isn't supported).
+        st.caption(
+            f":material/folder_open: **פרויקט פעיל:** {st.session_state.active_project_name} "
+            f"&nbsp;·&nbsp; קובץ: `{st.session_state.output_path.name}`"
+        )
+        project_name_input = st.session_state.active_project_name
 
-process_clicked = st.button(
-    "עבד תעודות",
-    icon=":material/play_arrow:",
-    type="primary",
-    disabled=not uploaded_files,
-)
+    allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS)
+    uploaded_files = st.file_uploader(
+        "גררו לכאן קובצי תעודות, או לחצו לבחירה",
+        type=allowed_types,
+        accept_multiple_files=True,
+        help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}",
+        # Suffix bumped by "התחל פרויקט חדש" below - Streamlit treats a widget
+        # with a new key as a brand-new, empty instance, which is the standard
+        # way to force-clear a file_uploader's selection programmatically.
+        key=f"uploader_{st.session_state.uploader_key_suffix}",
+    )
+
+    process_clicked = st.button(
+        "עבד תעודות",
+        icon=":material/play_arrow:",
+        type="primary",
+        disabled=not uploaded_files,
+    )
 
 if process_clicked:
     if not config.ANTHROPIC_API_KEY:
@@ -358,9 +402,9 @@ if st.session_state.just_completed and (st.session_state.records or st.session_s
 
 # --- Live results table + Excel download ---------------------------------
 st.divider()
-st.subheader("תוצאות", text_alignment="right")
 
 if not st.session_state.records:
+    st.subheader(":material/checklist: תוצאות", text_alignment="right")
     st.info(
         'טרם עובדו תעודות בפרויקט זה. תנו שם לפרויקט למעלה (או השאירו את ברירת '
         'המחדל), גררו קבצים לתיבת ההעלאה ולחצו על "עבד תעודות".',
@@ -373,83 +417,118 @@ if not st.session_state.records:
 else:
     header_by_key = dict(EXCEL_COLUMNS)
     keys = [key for key, _label in EXCEL_COLUMNS]
+    # "status_symbol" is a display-only column (not one of EXCEL_COLUMNS, not
+    # touched by the merge-back loop below) - a second, symbol-based signal
+    # for רמת ביטחון alongside its own text value and the existing
+    # background-fill coloring, per the design request. Inserted right
+    # before confidence in column order, wherever that lands in EXCEL_COLUMNS.
+    _STATUS_KEY = "status_symbol"
+    display_keys = []
+    for key in keys:
+        if key == "confidence":
+            display_keys.append(_STATUS_KEY)
+        display_keys.append(key)
+    header_by_key[_STATUS_KEY] = "מצב"
 
-    filter_choice = st.segmented_control(
-        "הצג",
-        options=["הכל", "נמוכה ובינונית", "רק נמוכה"],
-        default="הכל",
-        required=True,
-        label_visibility="collapsed",
-    )
-    _levels_by_filter = {
-        "הכל": set(CONFIDENCE_LEVELS),
-        "נמוכה ובינונית": {"נמוכה", "בינונית"},
-        "רק נמוכה": {"נמוכה"},
-    }
-    visible_levels = _levels_by_filter.get(filter_choice, set(CONFIDENCE_LEVELS))
-    filtered_indices = [
-        i for i, r in enumerate(st.session_state.records) if r.get("confidence") in visible_levels
-    ]
-    visible_records = [st.session_state.records[i] for i in filtered_indices]
+    with st.container(key="results_card"):
+        st.subheader(":material/checklist: תוצאות", text_alignment="right")
 
-    def _selectbox_options(closed_list, current_values):
-        # Always offer the closed list, plus any value already present in the
-        # visible rows that isn't on it. _flag_out_of_list_values() (in
-        # extractor.py) deliberately *keeps* an out-of-list waste_type/region
-        # on the record instead of blanking it, precisely so a reviewer can
-        # see what the model actually returned - constraining the dropdown to
-        # only the closed list would silently discard that value the moment
-        # this table renders, undoing that.
-        extra = sorted({v for v in current_values if v and v not in closed_list})
-        return [""] + list(closed_list) + extra
-
-    # __idx__ carries each row's position in st.session_state.records through
-    # the editor and back - hidden from view via column_config below, but
-    # still round-trips in the returned data (per st.column_config's own
-    # "hides from the UI, data still there" behavior). Matching edits back by
-    # this explicit id, rather than by row position, means the merge below
-    # stays correct even if a future Streamlit version adds interactive
-    # sorting to st.data_editor.
-    rows = [{**{k: r.get(k, "") for k in keys}, "__idx__": i} for i, r in zip(filtered_indices, visible_records)]
-    df = pd.DataFrame(rows, columns=keys + ["__idx__"])
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
-    df = df.rename(columns=header_by_key)
-
-    def _highlight_source_cell(row):
-        # Pandas Styler styles only survive on non-editable columns in
-        # st.data_editor (documented behavior) - "קובץ מקור" is disabled
-        # below anyway (editing it would break its role as the row's link
-        # back to the original file), which happens to be exactly the one
-        # column this can still color.
-        color = _ROW_COLORS.get(row["רמת ביטחון"])
-        return [
-            f"background-color: {color}" if (color and col == "קובץ מקור") else "" for col in row.index
+        filter_choice = st.segmented_control(
+            "הצג",
+            options=["הכל", "נמוכה ובינונית", "רק נמוכה"],
+            default="הכל",
+            required=True,
+            label_visibility="collapsed",
+        )
+        _levels_by_filter = {
+            "הכל": set(CONFIDENCE_LEVELS),
+            "נמוכה ובינונית": {"נמוכה", "בינונית"},
+            "רק נמוכה": {"נמוכה"},
+        }
+        visible_levels = _levels_by_filter.get(filter_choice, set(CONFIDENCE_LEVELS))
+        filtered_indices = [
+            i for i, r in enumerate(st.session_state.records) if r.get("confidence") in visible_levels
         ]
+        visible_records = [st.session_state.records[i] for i in filtered_indices]
 
-    styled = df.style.apply(_highlight_source_cell, axis=1)
+        def _selectbox_options(closed_list, current_values):
+            # Always offer the closed list, plus any value already present in
+            # the visible rows that isn't on it. _flag_out_of_list_values()
+            # (in extractor.py) deliberately *keeps* an out-of-list
+            # waste_type/region on the record instead of blanking it,
+            # precisely so a reviewer can see what the model actually
+            # returned - constraining the dropdown to only the closed list
+            # would silently discard that value the moment this table renders.
+            extra = sorted({v for v in current_values if v and v not in closed_list})
+            return [""] + list(closed_list) + extra
 
-    edited_df = st.data_editor(
-        styled,
-        key="results_editor",
-        hide_index=True,
-        column_config={
-            "__idx__": None,
-            "קובץ מקור": st.column_config.TextColumn(disabled=True),
-            "כמות": st.column_config.NumberColumn(format="%,.2f"),
-            "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
-            "סוג הפסולת": st.column_config.SelectboxColumn(
-                options=_selectbox_options(
-                    WASTE_TYPES + [UNCLASSIFIED_WASTE_TYPE], (r.get("waste_type") for r in visible_records)
-                )
-            ),
-            "מרחב": st.column_config.SelectboxColumn(
-                options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
-            ),
-            "חודש": st.column_config.SelectboxColumn(
-                options=_selectbox_options(HEBREW_MONTHS, (r.get("month") for r in visible_records))
-            ),
-        },
-    )
+        # __idx__ carries each row's position in st.session_state.records
+        # through the editor and back - hidden from view via column_config
+        # below, but still round-trips in the returned data (per
+        # st.column_config's own "hides from the UI, data still there"
+        # behavior). Matching edits back by this explicit id, rather than by
+        # row position, means the merge below stays correct even if a future
+        # Streamlit version adds interactive sorting to st.data_editor.
+        rows = [
+            {
+                **{k: r.get(k, "") for k in keys},
+                _STATUS_KEY: _STATUS_SYMBOLS.get(r.get("confidence"), ""),
+                "__idx__": i,
+            }
+            for i, r in zip(filtered_indices, visible_records)
+        ]
+        df = pd.DataFrame(rows, columns=display_keys + ["__idx__"])
+        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+        df = df.rename(columns=header_by_key)
+
+        def _highlight_source_cell(row):
+            # Pandas Styler styles only survive on non-editable columns in
+            # st.data_editor (documented behavior) - "קובץ מקור" and "מצב"
+            # are both disabled below anyway (editing "קובץ מקור" would break
+            # its role as the row's link back to the original file; "מצב" is
+            # a computed display-only symbol), which happens to be exactly
+            # the two columns this can still color.
+            confidence = row["רמת ביטחון"]
+            color = _ROW_COLORS.get(confidence)
+            styles = []
+            for col in row.index:
+                if color and col == "קובץ מקור":
+                    styles.append(f"background-color: {color}")
+                elif col == "מצב" and confidence == "גבוהה":
+                    # The "high confidence" accent border from the design
+                    # request - the editable columns can't carry a Styler
+                    # style at all (see the docstring note above), so this
+                    # read-only symbol column is where it actually can render.
+                    styles.append(f"border: 2px solid {_ACCENT_GOLD}; background-color: #FCF3DE")
+                else:
+                    styles.append("")
+            return styles
+
+        styled = df.style.apply(_highlight_source_cell, axis=1)
+
+        edited_df = st.data_editor(
+            styled,
+            key="results_editor",
+            hide_index=True,
+            column_config={
+                "__idx__": None,
+                "מצב": st.column_config.TextColumn(disabled=True, width="small"),
+                "קובץ מקור": st.column_config.TextColumn(disabled=True),
+                "כמות": st.column_config.NumberColumn(format="%,.2f"),
+                "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
+                "סוג הפסולת": st.column_config.SelectboxColumn(
+                    options=_selectbox_options(
+                        WASTE_TYPES + [UNCLASSIFIED_WASTE_TYPE], (r.get("waste_type") for r in visible_records)
+                    )
+                ),
+                "מרחב": st.column_config.SelectboxColumn(
+                    options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
+                ),
+                "חודש": st.column_config.SelectboxColumn(
+                    options=_selectbox_options(HEBREW_MONTHS, (r.get("month") for r in visible_records))
+                ),
+            },
+        )
 
     # Merge edits back into session_state.records by __idx__, then keep the
     # file in sync with whatever's now on screen - every rerun, not just
@@ -490,7 +569,7 @@ else:
 
     # --- Source page viewer, next to the row it came from --------------------
     st.divider()
-    st.subheader("תצוגת עמוד מקור", text_alignment="right")
+    st.subheader(":material/description: תצוגת עמוד מקור", text_alignment="right")
 
     row_labels = [
         f"{i + 1}. {r.get('source_file', '')} - {r.get('site') or r.get('waste_type') or '(ללא זיהוי)'}"
@@ -529,16 +608,19 @@ else:
 # review" count above misleading either way.
 if st.session_state.skipped:
     st.divider()
-    st.subheader(f"מסמכים שדולגו ({len(st.session_state.skipped)})", text_alignment="right")
-    st.caption(
-        ":gray[עמודים שזוהו כמסמכים שאינם תעודות שקילה/פינוי כלל (למשל תעודות חיוב/"
-        "זיכוי פנימיות) - לא נכשלו בחילוץ, ולכן לא נספרים בתקציר למעלה ולא נכתבים "
-        "לקובץ ה-Excel. מוצגים כאן רק למידע, כדי שיהיה ברור שהם לא אבדו בטעות.]"
-    )
-    skipped_table = pd.DataFrame(
-        [
-            {"קובץ מקור": r.get("source_file", ""), "סיבה": r.get("notes", "") or "-"}
-            for r in st.session_state.skipped
-        ]
-    )
-    st.table(skipped_table, hide_index=True)
+    with st.container(key="skipped_card"):
+        st.subheader(
+            f":material/block: מסמכים שדולגו ({len(st.session_state.skipped)})", text_alignment="right"
+        )
+        st.caption(
+            ":gray[עמודים שזוהו כמסמכים שאינם תעודות שקילה/פינוי כלל (למשל תעודות חיוב/"
+            "זיכוי פנימיות) - לא נכשלו בחילוץ, ולכן לא נספרים בתקציר למעלה ולא נכתבים "
+            "לקובץ ה-Excel. מוצגים כאן רק למידע, כדי שיהיה ברור שהם לא אבדו בטעות.]"
+        )
+        skipped_table = pd.DataFrame(
+            [
+                {"קובץ מקור": r.get("source_file", ""), "סיבה": r.get("notes", "") or "-"}
+                for r in st.session_state.skipped
+            ]
+        )
+        st.table(skipped_table, hide_index=True)

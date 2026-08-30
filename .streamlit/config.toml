@@ -1,6 +1,11 @@
-# Deep forest green + earthy gold-brown + warm cream theme (company palette).
-# font = "sans-serif" (a built-in option, not a Google Fonts URL) so the app
-# renders correctly even on an office network with no internet access.
+# Deep forest green + earthy gold-brown + warm cream theme (company palette),
+# now with Rubik (Google Fonts, Hebrew-supporting) instead of generic
+# sans-serif. That's a deliberate trade-off from the earlier offline-safe
+# choice: Rubik needs internet access to load; the font string below lists
+# 'Assistant' (also loaded from the same Google Fonts request) as a second
+# Hebrew-supporting choice and plain sans-serif as a final fallback, so a
+# blocked/offline network degrades to a generic (but still readable) font
+# instead of breaking anything.
 [theme]
 base = "light"
 primaryColor = "#1B4332"
@@ -9,25 +14,30 @@ secondaryBackgroundColor = "#F0EBE0"
 textColor = "#1A1A1A"
 linkColor = "#8B6F47"
 borderColor = "#D9CCB8"
-font = "sans-serif"
-baseRadius = "8px"
-buttonRadius = "8px"
+font = "'Rubik', 'Assistant', sans-serif:https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;700;900&family=Assistant:wght@300;400;500;700&display=swap"
+baseFontWeight = 300
+baseRadius = "12px"
+buttonRadius = "10px"
 showWidgetBorder = true
 
 redColor = "#C0392B"
 yellowColor = "#B7860B"
-# Reused by streamlit_app.py's title (":green[...]" markdown) and caption
-# (":gray[...]") so both pick up the brand palette through Streamlit's own
-# color tokens instead of custom CSS - greenColor matches primaryColor
-# exactly (the requested title color), grayColor is repurposed as the
-# gold-brown accent (the requested subtitle tone), not an actual gray.
+# Gold/amber accent pulled from the logo's ring color - used sparingly (see
+# streamlit_app.py's high-confidence accent), not as a primary UI color.
+orangeColor = "#C9982F"
+# Reused by streamlit_app.py's title (":green[...]" markdown, inside the
+# gradient header card) and caption (":gray[...]") so both pick up the brand
+# palette through Streamlit's own color tokens instead of custom CSS -
+# greenColor matches primaryColor exactly, grayColor is repurposed as the
+# gold-brown accent, not an actual gray.
 greenColor = "#1B4332"
 grayColor = "#8B6F47"
 
 dataframeBorderColor = "#D9CCB8"
 dataframeHeaderBackgroundColor = "#F0EBE0"
 
-# Bigger, bolder h1 (st.title) per the design request - other levels nudged
-# up slightly too for a consistent scale, not just the title in isolation.
-headingFontSizes = ["44px", "28px", "22px", "18px", "16px", "14px"]
-headingFontWeights = [800, 700, 600, 600, 600, 600]
+# Bigger, bolder headings for clearer hierarchy (weight carries as much of
+# the hierarchy as size does, per the design request) - h1 (st.title) most
+# of all, tapering down through h2-h6.
+headingFontSizes = ["46px", "28px", "22px", "18px", "16px", "14px"]
+headingFontWeights = [900, 700, 700, 600, 600, 600]
