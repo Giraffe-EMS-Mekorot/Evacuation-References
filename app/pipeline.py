@@ -69,9 +69,17 @@ def process_files(
     Streamlit UI, since both call this function.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    existing_records = read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
-    normalizer = NameNormalizer.build_from_records(existing_records)
-    quantity_history = build_quantity_history(existing_records)
+    try:
+        existing_records = read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
+        normalizer = NameNormalizer.build_from_records(existing_records)
+        quantity_history = build_quantity_history(existing_records)
+    except Exception:
+        # Same "missing/unreadable history is an empty starting point, never
+        # an error" policy read_existing_records() already applies to a
+        # corrupt file - extended here to cover the bootstrap step itself, so
+        # a batch can never fail before even a single file is attempted.
+        normalizer = NameNormalizer()
+        quantity_history = {}
 
     records = []
     skipped = []
@@ -89,14 +97,24 @@ def process_files(
             if record.get("document_type") == DOCUMENT_TYPE_OTHER:
                 skipped.append(record)
                 continue
-            normalizer.normalize(record)
-            # quantity is still the raw extractor string here - parsed just
-            # for this comparison, not written back, so every caller keeps
-            # seeing the same raw-string-or-empty value they always have
-            # (main.py's CLI never parses it in memory at all; write_records()
-            # does that itself at Excel-write time).
-            parsed_qty = parse_quantity(record.get("quantity"))
-            if parsed_qty is not None:
-                flag_quantity_outlier(record, parsed_qty, quantity_history)
+            try:
+                normalizer.normalize(record)
+                # quantity is still the raw extractor string here - parsed
+                # just for this comparison, not written back, so every caller
+                # keeps seeing the same raw-string-or-empty value they always
+                # have (main.py's CLI never parses it in memory at all;
+                # write_records() does that itself at Excel-write time).
+                parsed_qty = parse_quantity(record.get("quantity"))
+                if parsed_qty is not None:
+                    flag_quantity_outlier(record, parsed_qty, quantity_history)
+            except Exception as exc:
+                # A bug in these two post-processing checks must never crash
+                # an otherwise-successfully-extracted record - it still has
+                # real data worth keeping, just without this round's
+                # normalization/outlier pass. Surfaced as a visible note
+                # (not swallowed silently) so a recurrence is diagnosable
+                # from the spreadsheet itself, not just from server logs.
+                note = f"שגיאה בבדיקת נרמול/כמות: {exc}"
+                record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
             records.append(record)
     return ProcessResult(records=records, skipped=skipped)

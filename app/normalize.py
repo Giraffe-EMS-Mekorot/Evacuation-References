@@ -105,10 +105,20 @@ class NameNormalizer:
                 canonical = match[0]
                 if canonical != value:
                     note = f'נורמל מ-"{value}"'
-                    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+                    self._append_note(record, note)
                     record[field] = canonical
                     value = canonical  # don't also remember the raw spelling as a new "known" name
             else:
-                note = "ספק/אתר חדש - לא קיים ברשימת הייחוס"
-                record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+                self._append_note(record, "ספק/אתר חדש - לא קיים ברשימת הייחוס")
             self._remember(field, value)
+
+    @staticmethod
+    def _append_note(record: dict, note: str) -> None:
+        # site and reference_type are checked independently and can easily
+        # carry the exact same value (many certificates only ever name the
+        # supplier once, reused for both fields) - without this guard, one
+        # normalize() call could append the identical note twice.
+        existing = record.get("notes") or ""
+        if note in existing:
+            return
+        record["notes"] = f"{existing} | {note}" if existing else note
