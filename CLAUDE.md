@@ -316,11 +316,108 @@ different column count/order would have silently misaligned every value.
 It now builds a `{header_label: record_key}` map from the current
 `EXCEL_COLUMNS`, falling back to `_LEGACY_HEADER_ALIASES` for the specific
 headers this reorder renamed (`"כמות"` → quantity, `"אתר/יחידה"` → site,
-`"סוג אסמכתא מצורפת"` → supplier_or_carrier) or dropped (`"שנה"`/`"חודש"` →
-`None`, meaning "no replacement, skip this column"). A column in the old
-file that matches neither is silently skipped (not an error) — this is what
-lets a project file from before this change keep accumulating correctly
-after it, instead of a reused project name corrupting its own history.
+`"סוג אסמכתא מצורפת"` → supplier_or_carrier, and `"ספק/מוביל"` →
+supplier_or_carrier too — see the 2026-08-30 follow-up below, same day, that
+renamed the *display* header again to "אתר קולט" without touching the
+`supplier_or_carrier` key) or reconstructed (`"שנה"`/`"חודש"` → the sentinel
+`_LEGACY_YEAR_KEY`/`_LEGACY_MONTH_KEY`, post-processed into a synthesized
+`MM/YYYY` `date` — no day, since none exists on those old rows; see the
+follow-up below for why this isn't a straight drop like it originally was).
+A column in the old file that matches neither is silently skipped (not an
+error) — this is what lets a project file from before this change keep
+accumulating correctly after it, instead of a reused project name
+corrupting its own history.
+
+## Follow-up fixes, same day (2026-08-30): RTL-reversed names, a
+## misdiagnosed date-flagging "bug", legacy date migration, one more rename
+
+Four asks that came in immediately after the core-column reorder above, from
+the user reviewing its first real output. Two turned out to be real; two did
+not (traced down, not just dismissed) — worth reading past the fix list to
+the investigation notes, so a similar report next time gets checked instead
+of re-"fixed":
+
+**1. RTL-reversed supplier name.** The user reported a name reading backwards
+in `output/ריכוז_תעודות.xlsx`. Inspected that file's actual cell codepoints
+directly (`repr()` + `hex(ord(c))`, not just eyeballing rendered text) —
+**the stored data was correct**, spelled forward, no bidi control
+characters. The garbled appearance was almost certainly a copy/paste or
+terminal-rendering artifact on the way from Excel into the chat, not a
+pipeline bug — nothing in that specific file needed fixing or removing, and
+none was (a backup was still taken before this session's other Excel-facing
+changes, per the ask, out of caution). Real risk taken seriously anyway,
+since a vision model misreading RTL Hebrew glyphs in left-to-right pixel
+order is a genuine, known failure mode even though this particular report
+wasn't an instance of it:
+- `normalize.looks_reversed_hebrew()` (new): a dictionary-free heuristic —
+  Hebrew has 5 letters with a mandatory word-final ("sofit") form
+  (ך ם ן ף ץ); a final form appearing mid-word, or a regular form that has
+  one (כ מ נ פ צ) ending a word, is a strong signal that word's characters
+  came out reversed. Only fires on a whitespace-split token that's pure
+  Hebrew letters (a mixed token like "מ.עבד" or "VERIDIS" is skipped
+  entirely, in either direction) — and only catches a reversal that
+  actually involves one of those 5 letters, which not every word does (e.g.
+  "הובלות" reversed trips nothing on its own; see the module docstring's
+  worked example before assuming this heuristic is a general-purpose
+  garbled-text detector — it isn't).
+- `NameNormalizer.normalize()`'s existing "no match → new name" branch now
+  tries the value's full-string reversal (`value[::-1]`) against the known-
+  names list *before* concluding "genuinely new" — a match there rewrites
+  to the known canonical spelling with its own distinct note (`תוקן מטקסט
+  שנקרא הפוך`), same mechanism as the existing OCR/handwriting-variant
+  path, just naming the different root cause. This one has real reference
+  data to correct against, unlike the next item.
+- `extractor._flag_possibly_reversed_text()` (new, called on
+  site/supplier_or_carrier/driver_name in `_extract_page`): flags only —
+  escalates confidence like `_enforce_core_field_confidence`'s pattern,
+  never auto-corrects. Extraction time has no "known names" list to check a
+  reversal against (that only exists in `pipeline.py`'s per-batch
+  `NameNormalizer`), so guessing which direction is "right" here would
+  violate this pipeline's whole "never guess, flag instead" policy.
+
+**2. "`_flag_unreasonable_date` wrongly flags valid dates like 27/07/26"**
+— investigated, not just patched. Traced the actual real system clock
+(`date.today()`, confirmed `2026-08-30` — matches the environment, not a
+sandbox-clock mismatch), then re-derived `derive_year_month("27/07/26")` by
+hand against it: `(2026, 7) > (2026, 8)` is `False`, so `is_future` is
+correctly `False` — **no bug in `derive.py` or `_flag_unreasonable_date`**.
+Confirmed against real run data too: none of a 10-record real batch ever hit
+`confidence == "נמוכה"` from this path, and none carried this function's own
+note text (`"תאריך לא סביר (עתידי): ..."`). What the user actually saw was
+the *model* volunteering "תאריך עתידי חריג" in `notes` on its own initiative
+— similar-sounding text, different source, and wrong: the model has no
+reliable way to know the real "today" (it was very likely comparing against
+its own training-cutoff-era sense of "recent," or the certificate's own
+reprint/export timestamp, neither of which is "today"). **The actual fix is
+a prompt change, not a `derive.py`/`extractor.py` logic change**: both the
+system prompt and the `notes` field's own `FIELD_DEFS` description now
+explicitly tell the model not to comment on date plausibility at all — this
+system already checks it deterministically and correctly after extraction,
+so the model doing it too just risked exactly this kind of confusing,
+occasionally-wrong duplicate signal.
+Also checked, since the user asked directly: **no "date-format-memory-per-
+supplier" mechanism exists anywhere in this codebase** (`normalize.py` only
+normalizes `site`/`supplier_or_carrier` name spellings — nothing about
+dates). If this comes up again, the user may be thinking of
+`derive_year_month()` in `derive.py`, which does read a full date including
+the day — but only to derive year+month from it, discarding the day itself;
+it was never a "memory" of anything.
+
+**3. Legacy year/month → partial date, on top of the reorder's own
+backward-compat.** The reorder above already made `read_existing_records()`
+header-name-based; this follow-up specifically taught it to *reconstruct*
+(not just skip) a `date` for a pre-reorder row that only ever had separate
+"שנה"/"חודש" columns — synthesized as `MM/YYYY` (e.g. `"06/2026"`), never
+inventing a day that was never on the certificate. See
+`_LEGACY_YEAR_KEY`/`_LEGACY_MONTH_KEY` in `excel_writer.py`.
+
+**4. Header rename: "ספק/מוביל" → "אתר קולט".** Display-only, same day as
+the reorder that introduced "ספק/מוביל" in the first place — the
+`supplier_or_carrier` record key and its `FIELD_DEFS` description are
+unchanged; only the `EXCEL_COLUMNS` label changed. `"ספק/מוביל"` was added
+to `_LEGACY_HEADER_ALIASES` alongside the older `"סוג אסמכתא מצורפת"`, so a
+file written in the few hours between these two renames still reads back
+correctly too.
 
 ## Known limitation: "don't guess" is prompt-only, and imperfect
 

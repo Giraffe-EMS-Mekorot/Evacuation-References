@@ -10,6 +10,7 @@ from . import config
 from .fields import (
     CONFIDENCE_LEVELS,
     EXCEL_COLUMNS,
+    HEBREW_MONTHS,
     INTERNAL_TRACKING_SHEET_COLUMNS,
     REGIONS,
     WASTE_TYPES,
@@ -47,17 +48,23 @@ _QTY_NUMBER_FORMAT = "#,##0.##"
 # Columns whose values read better centered (numeric) vs. right-aligned (text/RTL default).
 _CENTERED_KEYS = {"quantity"}
 
-# Hebrew headers this pipeline used before the core-column reorder/rename
-# (2026-08-30) - kept so read_existing_records() still recognizes a column
-# from a file written by that earlier version instead of dropping its data;
-# see that function's docstring. A value of None means the old column has no
-# replacement (it was dropped, not renamed).
+# Hebrew headers this pipeline used before a schema change - kept so
+# read_existing_records() still recognizes a column from a file written by
+# an earlier version instead of dropping its data; see that function's
+# docstring. Two special sentinel keys ("_legacy_year"/"_legacy_month", not
+# real record keys) let read_existing_records() reconstruct a partial "date"
+# value (month/year, no day - see _MONTH_YEAR_ONLY_FORMAT) for a row from
+# before the 2026-08-30 change that collapsed separate שנה/חודש columns into
+# one "תאריך" column; every other alias maps straight to its current key.
+_LEGACY_YEAR_KEY = "_legacy_year"
+_LEGACY_MONTH_KEY = "_legacy_month"
 _LEGACY_HEADER_ALIASES = {
-    "כמות": "quantity",
-    "אתר/יחידה": "site",
-    "סוג אסמכתא מצורפת": "supplier_or_carrier",
-    "שנה": None,
-    "חודש": None,
+    "כמות": "quantity",  # pre-2026-08-30: "כמות" (this pipeline's first header rename)
+    "אתר/יחידה": "site",  # pre-2026-08-30
+    "סוג אסמכתא מצורפת": "supplier_or_carrier",  # pre-2026-08-30 (field was also named reference_type then)
+    "ספק/מוביל": "supplier_or_carrier",  # 2026-08-30 through the same day's later "אתר קולט" rename
+    "שנה": _LEGACY_YEAR_KEY,  # pre-2026-08-30
+    "חודש": _LEGACY_MONTH_KEY,  # pre-2026-08-30
 }
 
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
@@ -245,6 +252,11 @@ def read_existing_records(path: Path) -> List[dict]:
     (e.g. before the 2026-08-30 core-column reorder), is still read
     correctly for whatever columns still match by name, instead of silently
     misaligning every value one version's reorder to the left/right.
+
+    A row with no "תאריך" column at all (written before that column existed,
+    only separate "שנה"/"חודש" ones) gets a synthesized MM/YYYY `date` -
+    see _LEGACY_YEAR_KEY/_LEGACY_MONTH_KEY - rather than losing its date
+    entirely or fabricating a day that was never on the certificate.
     """
     if not path.is_file():
         return []
@@ -269,6 +281,16 @@ def read_existing_records(path: Path) -> List[dict]:
             if key is None:
                 continue  # a column this version no longer recognizes
             record[key] = value if key == "quantity" and value is not None else ("" if value is None else str(value))
+
+        legacy_year = record.pop(_LEGACY_YEAR_KEY, None)
+        legacy_month = record.pop(_LEGACY_MONTH_KEY, None)
+        if not record.get("date") and legacy_year and legacy_month:
+            try:
+                month_num = HEBREW_MONTHS.index(legacy_month) + 1
+                record["date"] = f"{month_num:02d}/{legacy_year}"
+            except ValueError:
+                pass  # unrecognized month name - leave date blank, don't guess
+
         records.append(record)
     return records
 

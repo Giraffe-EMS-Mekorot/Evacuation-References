@@ -41,6 +41,7 @@ from .fields import (
     WASTE_TYPES,
     empty_record,
 )
+from .normalize import looks_reversed_hebrew
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
@@ -139,6 +140,9 @@ _SYSTEM_PROMPT = (
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
     "מטושטש'. אל תכתוב הסברים ארוכים על מה שעשית או איך הגעת לערך - רק את הבעיה. "
+    "אל תעיר בשדה הערות על סבירות התאריך (למשל 'תאריך עתידי') - אין לך דרך לדעת "
+    "מהו התאריך האמיתי של היום, ובדיקה כזו נעשית באופן מדויק ואוטומטי בקוד לאחר "
+    "החילוץ; חלץ את התאריך כפי שהוא כתוב בתעודה בלבד, ללא הערכה משלך על סבירותו. "
     f"חריג: כשמחזירים '{UNCLASSIFIED_WASTE_TYPE}' בסוג_הפסולת, או '{DOCUMENT_TYPE_OTHER}' "
     "בסוג_המסמך, כן יש לכתוב בהערות תיאור מדויק (התיאור המקורי מהתעודה, או סוג "
     "המסמך בהתאמה) גם אם זה יותר מ-4-5 מילים."
@@ -309,6 +313,35 @@ def _flag_unreasonable_date(record: dict) -> None:
     note = f"תאריך לא סביר ({reason}): {month_name} {year}"
     record["confidence"] = "נמוכה"
     record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
+
+
+_REVERSAL_CHECK_FIELDS = [
+    ("site", "אתר/מקור"),
+    ("supplier_or_carrier", "אתר קולט"),
+    ("driver_name", "שם נהג"),
+]
+
+
+def _flag_possibly_reversed_text(record: dict) -> None:
+    """Flags (never auto-corrects - unlike normalize.NameNormalizer, this
+    runs per-page with no "known names" list to safely correct against) a
+    record whose site/supplier_or_carrier/driver_name looks like its Hebrew
+    characters came out in reversed order - see
+    normalize.looks_reversed_hebrew for the detection rule and the
+    real-world vision-model failure mode (RTL glyphs read in left-to-right
+    pixel order) this guards against. Downgrades like
+    _enforce_core_field_confidence's pattern: escalates to at least
+    "בינונית", never downgrades a row already at "נמוכה"/"בינונית" for
+    another reason.
+    """
+    suspect_labels = [label for key, label in _REVERSAL_CHECK_FIELDS if looks_reversed_hebrew(record.get(key))]
+    if not suspect_labels:
+        return
+    if record["confidence"] not in ("נמוכה", "בינונית"):
+        record["confidence"] = "בינונית"
+    note = f"יתכן שנקרא הפוך (RTL): {', '.join(suspect_labels)}"
+    if note not in (record.get("notes") or ""):
+        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
 def _flag_gross_tare_mismatch(record: dict) -> None:
@@ -511,6 +544,7 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
             record.get("certificate_number") or record.get("reference_number") or ""
         )
         _flag_gross_tare_mismatch(record)
+        _flag_possibly_reversed_text(record)
         _append_container_note(record)
         _enforce_core_field_confidence(record)
     # Not an EXCEL_COLUMNS field - excel_writer.py's row-writing only reads
