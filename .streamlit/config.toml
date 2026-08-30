@@ -1,11 +1,23 @@
 # Deep forest green + earthy gold-brown + warm cream theme (company palette),
 # now with Rubik (Google Fonts, Hebrew-supporting) instead of generic
 # sans-serif. That's a deliberate trade-off from the earlier offline-safe
-# choice: Rubik needs internet access to load; the font string below lists
-# 'Assistant' (also loaded from the same Google Fonts request) as a second
-# Hebrew-supporting choice and plain sans-serif as a final fallback, so a
-# blocked/offline network degrades to a generic (but still readable) font
-# instead of breaking anything.
+# choice: Rubik needs internet access to load; the final "sans-serif" in the
+# font list is a plain built-in fallback, so a blocked/offline network
+# degrades to a generic (but still readable) font instead of breaking
+# anything.
+#
+# Only ONE font may be fetched via the URL half of this string - Streamlit
+# raises StreamlitAPIException ("contains multiple fonts") on every session
+# message if the query string has more than one `family=` parameter, which
+# in turn corrupts the message stream to the browser (surfaces there as a
+# generic "Connection lost" error - e.g. on the file uploader, misleadingly
+# looking like a rejected/invalid file). Verified with a real headless
+# browser: this exact exception, repeating on every rerun, was the cause of
+# a real bug report where every uploaded file showed as invalid. An earlier
+# version of this line tried to load both Rubik and Assistant in one URL -
+# don't reintroduce that; if a second Hebrew fallback is ever wanted, it
+# needs a locally-installed font name (no URL) or a font-face defined via
+# [[theme.fontFaces]] instead, not a second `family=` here.
 [theme]
 base = "light"
 primaryColor = "#1B4332"
@@ -14,7 +26,7 @@ secondaryBackgroundColor = "#F0EBE0"
 textColor = "#1A1A1A"
 linkColor = "#8B6F47"
 borderColor = "#D9CCB8"
-font = "'Rubik', 'Assistant', sans-serif:https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;700;900&family=Assistant:wght@300;400;500;700&display=swap"
+font = "Rubik:https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;700;900&display=swap"
 baseFontWeight = 300
 baseRadius = "12px"
 buttonRadius = "10px"
@@ -25,11 +37,11 @@ yellowColor = "#B7860B"
 # Gold/amber accent pulled from the logo's ring color - used sparingly (see
 # streamlit_app.py's high-confidence accent), not as a primary UI color.
 orangeColor = "#C9982F"
-# Reused by streamlit_app.py's title (":green[...]" markdown, inside the
-# gradient header card) and caption (":gray[...]") so both pick up the brand
-# palette through Streamlit's own color tokens instead of custom CSS -
-# greenColor matches primaryColor exactly, grayColor is repurposed as the
-# gold-brown accent, not an actual gray.
+# greenColor matches primaryColor, grayColor is repurposed as the gold-brown
+# accent (not an actual gray) - kept for any :green[]/:gray[] markdown text
+# elsewhere in the app to stay on-palette; the main title/caption no longer
+# use those directives themselves (the header card's CSS forces light text
+# there directly, since they sit on the dark gradient background instead).
 greenColor = "#1B4332"
 grayColor = "#8B6F47"
 
