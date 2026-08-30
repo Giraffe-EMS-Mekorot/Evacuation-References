@@ -43,11 +43,16 @@ def main() -> None:
     def on_error(path, exc):
         print(f"  שגיאה בעיבוד {path.name}: {exc}")
 
-    records = process_files(files, on_progress=on_progress, on_error=on_error)
+    records, skipped = process_files(files, on_progress=on_progress, on_error=on_error)
+
+    if skipped:
+        print(f"\n{len(skipped)} עמודים דולגו (לא זוהו כתעודות פינוי):")
+        for item in skipped:
+            print(f"  {item.get('source_file', '')}: {item.get('notes', '')}")
 
     output_path = config.OUTPUT_DIR / config.OUTPUT_FILENAME
     write_records(records, output_path)
-    print(f"נשמר: {output_path} ({len(records)} תעודות)")
+    print(f"\nנשמר: {output_path} ({len(records)} תעודות)")
 
 
 if __name__ == "__main__":

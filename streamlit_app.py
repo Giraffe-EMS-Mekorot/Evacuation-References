@@ -168,6 +168,12 @@ if not _check_password():
 # disk as history).
 if "records" not in st.session_state:
     st.session_state.records = []
+if "skipped" not in st.session_state:
+    # Pages the model classified as fields.DOCUMENT_TYPE_OTHER - not a waste
+    # certificate at all (e.g. an internal billing/credit note mixed into the
+    # same PDF). Shown in its own section below, never mixed into `records`
+    # or written to the project's Excel file - see app/pipeline.py.
+    st.session_state.skipped = []
 if "baseline_records" not in st.session_state:
     st.session_state.baseline_records = []
 if "output_path" not in st.session_state:
@@ -268,7 +274,7 @@ if process_clicked:
                 def on_progress(index, total, path):
                     status.update(label=f"מעבד ({index}/{total}): {path.name}")
 
-                new_records = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
+                new_records, new_skipped = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
 
             # process_files() always returns "quantity" as a raw string (like
             # every other extracted field); the numeric column downstream
@@ -293,6 +299,7 @@ if process_clicked:
                     record["quantity"] = ""
 
             st.session_state.records.extend(new_records)
+            st.session_state.skipped.extend(new_skipped)
             # Keep the in-memory order matching what write_records() below is
             # about to produce on disk (נמוכה first) - otherwise downloading
             # right after processing would reorder rows relative to what was
@@ -307,14 +314,17 @@ if process_clicked:
                 st.session_state.baseline_records + st.session_state.records,
                 st.session_state.output_path,
             )
-            status.update(label=f"הושלם - עובדו {len(new_records)} תעודות חדשות", state="complete")
+            skip_note = f", {len(new_skipped)} דולגו כלא-תעודות" if new_skipped else ""
+            status.update(
+                label=f"הושלם - עובדו {len(new_records)} תעודות חדשות{skip_note}", state="complete"
+            )
             st.session_state.just_completed = True
 
         for filename, error in errors:
             st.warning(f"שגיאה בעיבוד {filename}: {error}", icon=":material/warning:")
 
 # --- Explicit "what next" choice, right after a batch finishes -------------
-if st.session_state.just_completed and st.session_state.records:
+if st.session_state.just_completed and (st.session_state.records or st.session_state.skipped):
     st.success(
         f'העיבוד הושלם ונשמר בקובץ "{st.session_state.output_path.name}". מה ברצונך לעשות?',
         icon=":material/check_circle:",
@@ -337,6 +347,7 @@ if st.session_state.just_completed and st.session_state.records:
         # starting fresh only needs to detach this session's memory from it,
         # never a fold-forward like the old single-shared-file design had.
         st.session_state.records = []
+        st.session_state.skipped = []
         st.session_state.baseline_records = []
         st.session_state.output_path = None
         st.session_state.active_project_name = None
@@ -505,3 +516,29 @@ else:
         with fields_col:
             for key, label in EXCEL_COLUMNS:
                 st.write(f"**{label}:** {selected_record.get(key) or '—'}")
+
+# --- Skipped non-certificate documents --------------------------------------
+# Deliberately outside the records if/else above (renders even when a whole
+# batch turned out to be entirely non-certificates and `records` is empty),
+# and deliberately never mixed into the results table or the Excel file - see
+# app/pipeline.py's ProcessResult. A row here means the model looked at the
+# page and actively decided it isn't a waste certificate at all (a billing
+# note, a work order...); that's a fundamentally different situation from a
+# row in the results table with "נמוכה" confidence, which IS a certificate
+# the model tried and struggled with. Mixing the two would make the "needs
+# review" count above misleading either way.
+if st.session_state.skipped:
+    st.divider()
+    st.subheader(f"מסמכים שדולגו ({len(st.session_state.skipped)})", text_alignment="right")
+    st.caption(
+        ":gray[עמודים שזוהו כמסמכים שאינם תעודות שקילה/פינוי כלל (למשל תעודות חיוב/"
+        "זיכוי פנימיות) - לא נכשלו בחילוץ, ולכן לא נספרים בתקציר למעלה ולא נכתבים "
+        "לקובץ ה-Excel. מוצגים כאן רק למידע, כדי שיהיה ברור שהם לא אבדו בטעות.]"
+    )
+    skipped_table = pd.DataFrame(
+        [
+            {"קובץ מקור": r.get("source_file", ""), "סיבה": r.get("notes", "") or "-"}
+            for r in st.session_state.skipped
+        ]
+    )
+    st.table(skipped_table, hide_index=True)

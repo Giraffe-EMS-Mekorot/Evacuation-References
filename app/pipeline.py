@@ -5,14 +5,14 @@ streamlit_app.py's web UI so the two front ends can never drift in how a
 bad/corrupt file is handled.
 """
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, NamedTuple, Optional
 
 import anthropic
 
 from . import config
 from .excel_writer import parse_quantity, read_existing_records
 from .extractor import extract_certificate_pages
-from .fields import empty_record
+from .fields import DOCUMENT_TYPE_OTHER, empty_record
 from .normalize import NameNormalizer
 from .quantity_check import build_quantity_history, flag_quantity_outlier
 
@@ -29,23 +29,44 @@ ProgressCallback = Callable[[int, int, Path], None]
 ErrorCallback = Callable[[Path, Exception], None]
 
 
+class ProcessResult(NamedTuple):
+    """records: real certificates (including ones that failed to extract -
+    those still belong here, flagged via confidence/notes, per this
+    pipeline's long-standing policy of never silently dropping a genuine
+    certificate). skipped: pages the model itself classified as not being a
+    waste certificate at all (see fields.DOCUMENT_TYPE_OTHER) - kept
+    completely separate so a batch summary of "certificates that need review"
+    never gets diluted by irrelevant documents, and vice versa.
+    """
+
+    records: List[dict]
+    skipped: List[dict]
+
+
 def process_files(
     paths: List[Path],
     client: Optional[anthropic.Anthropic] = None,
     on_progress: Optional[ProgressCallback] = None,
     on_error: Optional[ErrorCallback] = None,
-) -> List[dict]:
+) -> ProcessResult:
     """Extracts one or more records per file, in order (one per page for a
     PDF, one for a plain image). A file that can't even be opened/split at
     all never aborts the batch - it's recorded via fields.empty_record() with
     the exception text in its notes, and processing continues with the rest.
 
-    Also runs each record's free-text name fields (site/reference_type)
-    through NameNormalizer, and its quantity through a historical-outlier
-    sanity check - both bootstrapped from whatever's already in
-    output/ריכוז_תעודות.xlsx (see app/normalize.py and app/quantity_check.py).
-    This applies uniformly to both the CLI and the Streamlit UI, since both
-    call this function.
+    A page the model classifies as fields.DOCUMENT_TYPE_OTHER (not a waste
+    certificate at all - e.g. an internal billing/credit note mixed into the
+    same PDF) is routed into the returned ProcessResult.skipped list instead
+    of .records, and skips normalization/quantity-outlier checks entirely -
+    neither makes sense against a document that was never trying to report a
+    waste quantity in the first place.
+
+    Also runs each certificate record's free-text name fields (site/
+    reference_type) through NameNormalizer, and its quantity through a
+    historical-outlier sanity check - both bootstrapped from whatever's
+    already in output/ריכוז_תעודות.xlsx (see app/normalize.py and
+    app/quantity_check.py). This applies uniformly to both the CLI and the
+    Streamlit UI, since both call this function.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     existing_records = read_existing_records(config.OUTPUT_DIR / config.OUTPUT_FILENAME)
@@ -53,6 +74,7 @@ def process_files(
     quantity_history = build_quantity_history(existing_records)
 
     records = []
+    skipped = []
     total = len(paths)
     for index, path in enumerate(paths, start=1):
         if on_progress:
@@ -64,6 +86,9 @@ def process_files(
                 on_error(path, exc)
             page_records = [empty_record(path.name, str(exc))]
         for record in page_records:
+            if record.get("document_type") == DOCUMENT_TYPE_OTHER:
+                skipped.append(record)
+                continue
             normalizer.normalize(record)
             # quantity is still the raw extractor string here - parsed just
             # for this comparison, not written back, so every caller keeps
@@ -73,5 +98,5 @@ def process_files(
             parsed_qty = parse_quantity(record.get("quantity"))
             if parsed_qty is not None:
                 flag_quantity_outlier(record, parsed_qty, quantity_history)
-        records.extend(page_records)
-    return records
+            records.append(record)
+    return ProcessResult(records=records, skipped=skipped)

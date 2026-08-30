@@ -30,6 +30,7 @@ from . import config
 from .derive import derive_year_month
 from .fields import (
     CONFIDENCE_LEVELS,
+    DOCUMENT_TYPE_OTHER,
     FIELD_DEFS,
     HEBREW_MONTHS,
     REGIONS,
@@ -86,8 +87,20 @@ _SYSTEM_PROMPT = (
     "אתה עוזר שמחלץ מידע מובנה מתעודות פינוי פסולת (PDF או תמונה סרוקה/מצולמת, "
     "חלקן ממוחשבות וחלקן כתובות בכתב יד). קרא את התעודה המצורפת בעיון והפעל את הכלי "
     f"{_TOOL_NAME} עם הנתונים שחילצת. "
+    "קבע קודם כל את סוג_המסמך (ראו הוראות השדה) - אם זה לא תעודת פינוי בפועל, אין "
+    "טעם לחפש בו שדות של כמות/סוג פסולת, ומותר להשאיר אותם ריקים. "
+    "אין פורמט קבוע אחד לתעודות האלה - ספקים שונים מנסחים ומסדרים שדות באופן שונה "
+    "לגמרי זה מזה, ושדות עשויים להופיע בכל מקום בעמוד (ראו גם הוראות השדות "
+    "הספציפיים). חפשו לפי המשמעות והתפקיד של כל שדה, לא לפי ניסוח או מיקום קבוע "
+    "מראש - ואם התעודה בפורמט שלא נראה מוכר, התייחסו אליה באותה רצינות כמו לפורמט "
+    "מוכר, לא כאל מקרה שאפשר לוותר עליו. "
     "מלא שדה רק אם הערך שלו כתוב או מופיע בבירור בתעודה עצמה - לא בהסקה מהקשר, "
     "לא משם הקובץ, ולא מדמיון לתעודות אחרות. "
+    "בתעודה כתובה בכתב יד: התייחסו לכל שדה בנפרד לפי מידת הבהירות שלו - אם שדה "
+    "מסוים כתוב בבירור (למשל תאריך קריא היטב) מלאו אותו בביטחון גבוה גם אם שדות "
+    "אחרים באותה תעודה מטושטשים או לא ברורים; אל תוותרו על שדה שכן ניתן לקרוא רק "
+    "בגלל ששדה אחר לא ניתן. ההפך גם נכון: אל תוותרו מראש על ניסיון לקרוא שדה רק כי "
+    "הכתב יד קשה - קראו כמיטב יכולתכם ומלאו את מה שאתם כן מזהים בביטחון סביר. "
     "אם שדה כלשהו אינו ניתן לזיהוי ודאי, או שמילויו מצריך הסקה/ניחוש - השאר אותו "
     "כמחרוזת ריקה. שדה ריק תמיד עדיף על ניחוש שגוי. יוצא מן הכלל היחיד הוא "
     "סוג_הפסולת - ראו את הוראות השדה עצמו: שם אסור להשאיר ריק, ויש להחזיר "
@@ -103,8 +116,9 @@ _SYSTEM_PROMPT = (
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
     "מטושטש'. אל תכתוב הסברים ארוכים על מה שעשית או איך הגעת לערך - רק את הבעיה. "
-    f"חריג: כשמחזירים '{UNCLASSIFIED_WASTE_TYPE}' בסוג_הפסולת, כן יש לכתוב בהערות "
-    "את התיאור המקורי המדויק מהתעודה, גם אם זה יותר מ-4-5 מילים."
+    f"חריג: כשמחזירים '{UNCLASSIFIED_WASTE_TYPE}' בסוג_הפסולת, או '{DOCUMENT_TYPE_OTHER}' "
+    "בסוג_המסמך, כן יש לכתוב בהערות תיאור מדויק (התיאור המקורי מהתעודה, או סוג "
+    "המסמך בהתאמה) גם אם זה יותר מ-4-5 מילים."
 )
 
 
@@ -309,11 +323,19 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
         raise RuntimeError("המודל לא החזיר קריאת כלי (tool_use)")
 
     record = {name: str(tool_use.input.get(name, "") or "").strip() for name, *_ in FIELD_DEFS}
-    _flag_out_of_list_values(record)
-    _flag_unclassified_waste_type(record)
-    record["year"], record["month"] = derive_year_month(record["date"])
-    _flag_unreasonable_date(record)
-    _enforce_core_field_confidence(record)
+    if record.get("document_type") == DOCUMENT_TYPE_OTHER:
+        # Not a waste certificate at all (see FIELD_DEFS's document_type) -
+        # none of the certificate-specific checks below make sense against a
+        # billing note or work order, so skip them entirely rather than
+        # flag a "problem" that isn't one. app.pipeline.process_files routes
+        # this into its own "skipped" list, never into the normal records.
+        record["year"], record["month"] = "", ""
+    else:
+        _flag_out_of_list_values(record)
+        _flag_unclassified_waste_type(record)
+        record["year"], record["month"] = derive_year_month(record["date"])
+        _flag_unreasonable_date(record)
+        _enforce_core_field_confidence(record)
     # Not an EXCEL_COLUMNS field - excel_writer.py's row-writing only reads
     # keys it knows about, so this rides along harmlessly for callers (like
     # main.py's CLI) that never look at it. streamlit_app.py uses it to show
