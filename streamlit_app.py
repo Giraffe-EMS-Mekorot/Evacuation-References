@@ -29,7 +29,14 @@ import streamlit as st
 
 from app import config
 from app.excel_writer import parse_quantity, read_existing_records, sort_by_confidence, write_records
-from app.fields import CONFIDENCE_LEVELS, EXCEL_COLUMNS, HEBREW_MONTHS, REGIONS, UNCLASSIFIED_WASTE_TYPE, WASTE_TYPES
+from app.fields import (
+    CONFIDENCE_LEVELS,
+    EXCEL_COLUMNS,
+    INTERNAL_TRACKING_FIELDS,
+    REGIONS,
+    UNCLASSIFIED_WASTE_TYPE,
+    WASTE_TYPES,
+)
 from app.pipeline import process_files
 
 _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
@@ -415,23 +422,40 @@ if not st.session_state.records:
             st.metric('סה"כ תעודות בפרויקט', 0)
             st.metric("מסומנות לבדיקה ידנית", 0)
 else:
-    header_by_key = dict(EXCEL_COLUMNS)
-    keys = [key for key, _label in EXCEL_COLUMNS]
-    # "status_symbol" is a display-only column (not one of EXCEL_COLUMNS, not
-    # touched by the merge-back loop below) - a second, symbol-based signal
-    # for רמת ביטחון alongside its own text value and the existing
-    # background-fill coloring, per the design request. Inserted right
-    # before confidence in column order, wherever that lands in EXCEL_COLUMNS.
-    _STATUS_KEY = "status_symbol"
-    display_keys = []
-    for key in keys:
-        if key == "confidence":
-            display_keys.append(_STATUS_KEY)
-        display_keys.append(key)
-    header_by_key[_STATUS_KEY] = "מצב"
-
     with st.container(key="results_card"):
         st.subheader(":material/checklist: תוצאות", text_alignment="right")
+
+        # Off by default - vehicle/driver/entry-exit-time/gross-tare-weight
+        # are collected from every certificate (see extractor.py) but kept
+        # out of the main columns unless a reviewer specifically asks for
+        # them here. The same fields are always in the Excel file's own
+        # separate "מעקב פנימי" sheet regardless of this toggle - see
+        # excel_writer.py's _write_internal_tracking_sheet.
+        show_internal_tracking = st.checkbox(
+            "הצג פרטים נוספים (מעקב פנימי)",
+            help='מוסיף לטבלה עמודות שנאספות מהתעודה אך לא מוצגות כברירת מחדל: '
+            'מס\' רכב, שם נהג, שעות כניסה/יציאה, משקל ברוטו/טרה. עמודות אלה '
+            'תמיד נשמרות גם בגיליון "מעקב פנימי" הנפרד שבקובץ ה-Excel, גם '
+            "כשהתיבה הזו לא מסומנת.",
+        )
+
+        header_by_key = dict(EXCEL_COLUMNS)
+        keys = [key for key, _label in EXCEL_COLUMNS]
+        if show_internal_tracking:
+            header_by_key.update(INTERNAL_TRACKING_FIELDS)
+            keys = keys + [key for key, _label in INTERNAL_TRACKING_FIELDS]
+        # "status_symbol" is a display-only column (not one of EXCEL_COLUMNS, not
+        # touched by the merge-back loop below) - a second, symbol-based signal
+        # for רמת ביטחון alongside its own text value and the existing
+        # background-fill coloring, per the design request. Inserted right
+        # before confidence in column order, wherever that lands in EXCEL_COLUMNS.
+        _STATUS_KEY = "status_symbol"
+        display_keys = []
+        for key in keys:
+            if key == "confidence":
+                display_keys.append(_STATUS_KEY)
+            display_keys.append(key)
+        header_by_key[_STATUS_KEY] = "מצב"
 
         filter_choice = st.segmented_control(
             "הצג",
@@ -514,7 +538,7 @@ else:
                 "__idx__": None,
                 "מצב": st.column_config.TextColumn(disabled=True, width="small"),
                 "קובץ מקור": st.column_config.TextColumn(disabled=True),
-                "כמות": st.column_config.NumberColumn(format="%,.2f"),
+                "כמות (נטו)": st.column_config.NumberColumn(format="%,.2f"),
                 "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
                 "סוג הפסולת": st.column_config.SelectboxColumn(
                     options=_selectbox_options(
@@ -523,9 +547,6 @@ else:
                 ),
                 "מרחב": st.column_config.SelectboxColumn(
                     options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
-                ),
-                "חודש": st.column_config.SelectboxColumn(
-                    options=_selectbox_options(HEBREW_MONTHS, (r.get("month") for r in visible_records))
                 ),
             },
         )
@@ -593,7 +614,8 @@ else:
                     icon=":material/info:",
                 )
         with fields_col:
-            for key, label in EXCEL_COLUMNS:
+            fields_to_show = EXCEL_COLUMNS + (INTERNAL_TRACKING_FIELDS if show_internal_tracking else [])
+            for key, label in fields_to_show:
                 st.write(f"**{label}:** {selected_record.get(key) or '—'}")
 
 # --- Skipped non-certificate documents --------------------------------------

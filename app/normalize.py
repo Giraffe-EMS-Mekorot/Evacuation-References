@@ -1,4 +1,4 @@
-"""Fuzzy-matches free-text names (site/reference_type) extracted from a
+"""Fuzzy-matches free-text names (site/supplier_or_carrier) extracted from a
 certificate against a running list of names already seen, so near-duplicate
 spellings of the same site or supplier ("VERIDIS" vs "veridis ltd" vs
 "וריידיס בע\"מ" vs "וריידיס בעמ") collapse to one canonical value instead of
@@ -42,7 +42,7 @@ _SIMILARITY_THRESHOLD = 70
 # list. Both are free text with no closed list (unlike waste_type/region -
 # see fields.py) - exactly the kind of field where the same real-world name
 # comes back spelled differently certificate to certificate.
-NORMALIZED_FIELDS = ["site", "reference_type"]
+NORMALIZED_FIELDS = ["site", "supplier_or_carrier"]
 
 
 class NameNormalizer:
@@ -114,7 +114,7 @@ class NameNormalizer:
 
     @staticmethod
     def _append_note(record: dict, note: str) -> None:
-        # site and reference_type are checked independently and can easily
+        # site and supplier_or_carrier are checked independently and can easily
         # carry the exact same value (many certificates only ever name the
         # supplier once, reused for both fields) - without this guard, one
         # normalize() call could append the identical note twice.

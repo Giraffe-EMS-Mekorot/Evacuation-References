@@ -1,6 +1,6 @@
 """Single source of truth for the certificate schema.
 
-Two lists matter here, and each is edited independently:
+Three lists matter here, and each is edited independently:
 
   FIELD_DEFS    - what Claude extracts from the certificate image/PDF. Drives
                   the tool_use JSON schema built in extractor.py and the
@@ -8,11 +8,26 @@ Two lists matter here, and each is edited independently:
                   Each entry is (field_name, description_for_model, json_type).
 
   EXCEL_COLUMNS - the exact column order and Hebrew headers written to the
-                  output spreadsheet by excel_writer.py. Includes columns
-                  derived after extraction (year/month from date, via
-                  derive.py; the source filename, added by the pipeline) that
-                  aren't part of FIELD_DEFS. Each entry is
+                  main output-sheet by excel_writer.py. Includes columns
+                  derived after extraction (certificate_or_reference, from
+                  certificate_number/reference_number - see extractor.py)
+                  that aren't part of FIELD_DEFS. Each entry is
                   (record_key, hebrew_header).
+
+  INTERNAL_TRACKING_FIELDS / INTERNAL_TRACKING_SHEET_COLUMNS - fields that
+                  ARE extracted (they're in FIELD_DEFS) but are deliberately
+                  kept off the main sheet/table by default: vehicle/driver/
+                  entry-exit-time/gross-tare-weight. Still collected and
+                  saved, just surfaced behind the "הצג פרטים נוספים" toggle
+                  in streamlit_app.py and on Excel's second "מעקב פנימי"
+                  sheet (see excel_writer.py) rather than cluttering the
+                  main view every reviewer sees. INTERNAL_TRACKING_FIELDS is
+                  the plain 6-field set (used by the Streamlit toggle, which
+                  already shows the identifying columns in the main table);
+                  INTERNAL_TRACKING_SHEET_COLUMNS prepends a few identifying
+                  columns to that same set, since the Excel sheet is
+                  physically separate from the main sheet and needs to be
+                  self-sufficient without relying on row order alone.
 """
 
 WASTE_TYPES = [
@@ -49,6 +64,25 @@ UNCLASSIFIED_WASTE_TYPE = "לא מסווג/לא מזוהה"
 DOCUMENT_TYPE_CERTIFICATE = "תעודת פינוי"
 DOCUMENT_TYPE_OTHER = "לא תעודת פינוי"
 DOCUMENT_TYPES = [DOCUMENT_TYPE_CERTIFICATE, DOCUMENT_TYPE_OTHER]
+
+# A distinct, orthogonal classification from document_type above: whether
+# THIS page is one half of a common two-document pattern seen across several
+# (not one fixed) suppliers, where the same removal is documented twice -
+# once as a computerized "תעודת שקילה/משלוח" (weighing/delivery slip, with
+# ברוטו/טרה/נטו and its own מספר_תעודה) and once as a usually-handwritten
+# "אישור ביצוע עבודה/הטמנה" (work/disposal completion approval, with a
+# מספר_אסמכתא pointing back at the weighing slip's מספר_תעודה, a site/
+# location, and a signature). See FIELD_DEFS's cert_role entry for the full
+# field description sent to the model, and extractor.py's
+# _detect_and_cross_check_pairs for how two adjacent pages carrying these
+# two roles get cross-checked against each other. Deliberately identified by
+# the model from each page's own structure/headers, never from a supplier
+# name - the whole point is that this pattern isn't tied to one fixed
+# vendor. Blank (not one of these two values) is the common case - most
+# certificates aren't part of this pattern at all.
+CERT_ROLE_WEIGHING = "תעודת שקילה/משלוח"
+CERT_ROLE_COMPLETION = "אישור ביצוע עבודה/הטמנה"
+CERT_ROLES = [CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION]
 
 REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
@@ -89,7 +123,8 @@ FIELD_DEFS = [
         "תאריך הפינוי/העמסה, בפורמט DD/MM/YYYY. יכול להופיע בכל מקום בעמוד - למעלה, "
         "למטה, בתוך טבלה או מחוצה לה - חפש בכל האזורים, לא רק במקום שבו הוא נוטה "
         "להופיע בתעודות אחרות. אם לא ניתן לזהות בבירור - השאר ריק ואל תנחש. "
-        "(שדה זה משמש רק לגזירת שנה/חודש בקוד ואינו מוצג כעמודה בפני עצמו).",
+        "שדה זה מוצג כעמודה בפני עצמו, וגם משמש בקוד לבדיקת סבירות (תאריך עתידי/"
+        "ישן מדי) ולהצלבה מול מסמך מקושר, אם קיים (ראו תפקיד_התעודה_בזוג).",
         "string",
     ),
     (
@@ -111,6 +146,8 @@ FIELD_DEFS = [
         "כמות ק\"ג/טון וכו') תלוי בספק. חפש לפי המשמעות, לא לפי הניסוח המדויק: "
         "אם מופיעים כמה ערכים, קח את הכמות הרלוונטית לחיוב - בדרך כלל 'כמות לחיוב' "
         "אם קיימת, ואחרת 'משקל נטו' (לא ברוטו/טרה - נטו הוא כמות הפסולת בפועל). "
+        "אם קיימים בתעודה גם שדות ברוטו/טרה נפרדים - מלא אותם בשדות ברוטו/טרה "
+        "בנוסף לשדה זה, לא במקומו. "
         "זהו השדה הכי קריטי לדיוק בכל התעודה - לפני שאתה קובע את הערך הסופי, קרא "
         "כל ספרה בנפרד ובדוק אותה פעם שנייה (בפרט ספרות שקל להתבלבל ביניהן בכתב "
         "יד: 0/6/8, 1/7, 3/8, 4/9), וודא שמיקום הנקודה העשרונית ומספר הספרות "
@@ -142,16 +179,99 @@ FIELD_DEFS = [
     ),
     (
         "certificate_number",
-        "מספר התעודה כפי שמופיע עליה.",
+        "מספר התעודה של המסמך הזה עצמו, כפי שמופיע עליו (בדרך כלל בכותרת העליונה, "
+        "למשל 'תעודת משלוח מס' ...' או 'מספר: ...'). אל תמלא כאן מספר שמפנה למסמך "
+        "אחר - זה שייך לשדה מספר_אסמכתא.",
         "string",
     ),
     (
-        "reference_type",
-        "שם החברה/המערכת שהנפיקה את התעודה, למשל VERIDIS, אמניר, Ziv Metals, GRI. "
+        "reference_number",
+        "מספר אסמכתא - ממלאים רק כשמופיע בתעודה שדה נפרד המפנה במפורש למספר "
+        "התעודה של מסמך אחר (לרוב בתעודות מסוג 'אישור ביצוע עבודה/הטמנה', ראו "
+        "תפקיד_התעודה_בזוג - שם מצוין מספר האסמכתא של תעודת השקילה/משלוח המתאימה "
+        "לה). אל תמלא כאן את מספר התעודה של המסמך הזה עצמו - זה שייך לשדה "
+        "מספר_תעודה. אם אין בתעודה שדה 'אסמכתא' נפרד שמפנה למסמך אחר - השאר ריק.",
+        "string",
+    ),
+    (
+        "cert_role",
+        "סוג המבנה של התעודה, אם היא תואמת באופן מובהק לאחד משני דפוסים "
+        "שמופיעים אצל חלק מהספקים (לא כולם), כזוג מסמכים סמוכים שמתעד את אותה "
+        f"פעולת פינוי פעמיים: '{CERT_ROLE_WEIGHING}' - מסמך ממוחשב עם שדות "
+        f"ברוטו/טרה/נטו ומספר תעודה משלו; '{CERT_ROLE_COMPLETION}' - מסמך "
+        "(לרוב כתוב ביד) עם שדה 'אסמכתא' נפרד המפנה במפורש למספר תעודה של "
+        "מסמך אחר, אתר/מיקום ביצוע העבודה, וחתימה. זהה לפי המבנה/הכותרות "
+        "בפועל של התעודה הזו עצמה בלבד - לא לפי שם הספק (כדי שהזיהוי יעבוד גם "
+        "אצל ספק שטרם נתקלת בו) ובלי קשר לשאלה אם יש בקובץ עמוד נוסף שמתאים לה "
+        "- זו בדיקה נפרדת שנעשית בקוד, לא משהו שעליך לאמת בעצמך. כלומר: אם "
+        "התעודה הזו לבדה מציגה את המבנה המובהק (למשל שדות ברוטו/טרה/נטו "
+        f"ומספר תעודה) - סמן '{CERT_ROLE_WEIGHING}', גם אם אינך יודע אם יש "
+        "עמוד מקושר. אם אין לתעודה מבנה מובהק כזה (המקרה הנפוץ ביותר) - השאר "
+        "ריק.",
+        "string",
+    ),
+    (
+        "supplier_or_carrier",
+        "שם החברה/המערכת שהנפיקה את התעודה, או שם חברת ההובלה (מוביל) המצוינת "
+        "בה בנפרד אם קיימת, למשל VERIDIS, אמניר, Ziv Metals, GRI, מ.עבד הובלות. "
         "יכול להופיע בכל מקום בעמוד (בלוגו, בכותרת, בתחתית העמוד וכו') - חפש בכל "
         "האזורים, לא רק במקום הצפוי. אם הפורמט של התעודה לא מוכר ולא דומה לשום "
         "תעודה שראית בעבר - התייחס אליה באותה רצינות כמו לפורמט מוכר, אל תוותר "
         "ואל תשאיר שדות ריקים רק בגלל שהפורמט חדש.",
+        "string",
+    ),
+    (
+        "vehicle_number",
+        "מספר הרכב שביצע את ההובלה, כפי שמופיע בתעודה. שדה למעקב פנימי בלבד "
+        "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוין.",
+        "string",
+    ),
+    (
+        "driver_name",
+        "שם הנהג שביצע את ההובלה, כפי שמופיע בתעודה. שדה למעקב פנימי בלבד "
+        "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוין.",
+        "string",
+    ),
+    (
+        "entry_time",
+        "שעת הכניסה של הרכב לאתר, כפי שמופיעה בתעודה (למשל 6:29). שדה למעקב "
+        "פנימי בלבד (לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוינת.",
+        "string",
+    ),
+    (
+        "exit_time",
+        "שעת היציאה של הרכב מהאתר, כפי שמופיעה בתעודה. שדה למעקב פנימי בלבד "
+        "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוינת.",
+        "string",
+    ),
+    (
+        "gross_weight",
+        "משקל ברוטו, מספר בלבד (ללא יחידת מידה) - מופיע בעיקר בתעודות שקילה "
+        "ממוחשבות, יחד עם טרה ונטו. משמש בקוד לבדיקת סבירות מול הכמות (נטו) "
+        "שדווחה (ברוטו פחות טרה אמור להיות שווה לנטו) - קרא כל ספרה בזהירות, "
+        "כמו בשדה הכמות. השאר ריק אם לא מופיע בתעודה.",
+        "string",
+    ),
+    (
+        "tare_weight",
+        "משקל טרה (משקל הרכב הריק), מספר בלבד (ללא יחידת מידה) - מופיע בעיקר "
+        "בתעודות שקילה ממוחשבות, יחד עם ברוטו ונטו. משמש בקוד לבדיקת סבירות מול "
+        "הכמות (נטו) שדווחה - קרא כל ספרה בזהירות, כמו בשדה הכמות. השאר ריק אם "
+        "לא מופיע בתעודה.",
+        "string",
+    ),
+    (
+        "container_count",
+        "מספר המכולות המצוין בתעודה, אם רלוונטי (למשל תעודת הובלה שכתוב בה "
+        "'עמוסה 3 מכולות') - מספר בלבד. שדה זה מתווסף אוטומטית להערות ואינו "
+        "עמודה נפרדת - השאר ריק אם לא רלוונטי/לא מצוין.",
+        "string",
+    ),
+    (
+        "container_type",
+        "סוג/תיאור המכולה כפי שמופיע בתעודה (למשל 'מכולה פתוחה 8 קוב'), אם "
+        "רלוונטי. שדה זה מתווסף אוטומטית להערות ואינו עמודה נפרדת - השאר ריק "
+        "אם לא רלוונטי/לא מצוין.",
         "string",
     ),
     (
@@ -185,6 +305,7 @@ def empty_record(filename: str = "", error: str = "") -> dict:
     record["source_file"] = filename
     record["year"] = ""
     record["month"] = ""
+    record["certificate_or_reference"] = ""
     record["confidence"] = "נמוכה"
     if error:
         record["notes"] = f"שגיאת עיבוד: {error}"
@@ -192,16 +313,39 @@ def empty_record(filename: str = "", error: str = "") -> dict:
 
 
 EXCEL_COLUMNS = [
-    ("region", "מרחב"),
-    ("site", "אתר/יחידה"),
-    ("year", "שנה"),
-    ("month", "חודש"),
+    ("date", "תאריך"),
+    ("certificate_or_reference", "מספר תעודה/אסמכתא"),
+    ("supplier_or_carrier", "ספק/מוביל"),
+    ("site", "אתר/מקור"),
     ("waste_type", "סוג הפסולת"),
-    ("quantity", "כמות"),
+    ("quantity", 'כמות (נטו)'),
     ("unit", "יחידת מידה"),
-    ("reference_type", "סוג אסמכתא מצורפת"),
-    ("certificate_number", "מספר תעודה"),
+    ("region", "מרחב"),
     ("confidence", "רמת ביטחון"),
     ("notes", "הערות"),
     ("source_file", "קובץ מקור"),
 ]
+
+# Collected from every certificate (they're ordinary FIELD_DEFS entries) but
+# kept off the main table/sheet by default - see this module's docstring.
+# Used by streamlit_app.py's "הצג פרטים נוספים" toggle, which appends these
+# to the already-visible main columns, so no identifying columns are
+# repeated here.
+INTERNAL_TRACKING_FIELDS = [
+    ("vehicle_number", "מס' רכב"),
+    ("driver_name", "שם נהג"),
+    ("entry_time", "שעת כניסה"),
+    ("exit_time", "שעת יציאה"),
+    ("gross_weight", "משקל ברוטו"),
+    ("tare_weight", "משקל טרה"),
+]
+
+# The Excel "מעקב פנימי" sheet's full column set (see excel_writer.py) - a
+# few identifying columns prepended to INTERNAL_TRACKING_FIELDS, since that
+# sheet is physically separate from the main one and needs to let a reviewer
+# find the right row without relying on row order alone.
+INTERNAL_TRACKING_SHEET_COLUMNS = [
+    ("source_file", "קובץ מקור"),
+    ("certificate_or_reference", "מספר תעודה/אסמכתא"),
+    ("site", "אתר/מקור"),
+] + INTERNAL_TRACKING_FIELDS

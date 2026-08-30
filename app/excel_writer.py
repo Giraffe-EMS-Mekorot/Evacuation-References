@@ -7,9 +7,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from . import config
-from .fields import CONFIDENCE_LEVELS, EXCEL_COLUMNS, REGIONS, WASTE_TYPES
+from .fields import (
+    CONFIDENCE_LEVELS,
+    EXCEL_COLUMNS,
+    INTERNAL_TRACKING_SHEET_COLUMNS,
+    REGIONS,
+    WASTE_TYPES,
+)
 
 _MAIN_SHEET_NAME = "ריכוז תעודות"
+_INTERNAL_SHEET_NAME = "מעקב פנימי"
 _SUMMARY_SHEET_NAME = "סיכום"
 # A generous fixed bound, not the actual row count, so every SUMIFS/COUNTIF
 # formula on the summary sheet keeps covering rows added/edited by hand later
@@ -38,7 +45,20 @@ _TOTAL_FONT = Font(bold=True, size=11)
 _QTY_NUMBER_FORMAT = "#,##0.##"
 
 # Columns whose values read better centered (numeric) vs. right-aligned (text/RTL default).
-_CENTERED_KEYS = {"quantity", "year"}
+_CENTERED_KEYS = {"quantity"}
+
+# Hebrew headers this pipeline used before the core-column reorder/rename
+# (2026-08-30) - kept so read_existing_records() still recognizes a column
+# from a file written by that earlier version instead of dropping its data;
+# see that function's docstring. A value of None means the old column has no
+# replacement (it was dropped, not renamed).
+_LEGACY_HEADER_ALIASES = {
+    "כמות": "quantity",
+    "אתר/יחידה": "site",
+    "סוג אסמכתא מצורפת": "supplier_or_carrier",
+    "שנה": None,
+    "חודש": None,
+}
 
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
 _HEADERS = [label for _key, label in EXCEL_COLUMNS]
@@ -152,10 +172,58 @@ def write_records(records: List[dict], output_path: Path) -> None:
     ws.freeze_panes = "B2"
     ws.auto_filter.ref = ws.dimensions
 
+    _write_internal_tracking_sheet(wb, records)
     _write_summary_sheet(wb)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
+
+
+def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
+    """Writes the "מעקב פנימי" sheet: fields collected from the certificate
+    but not shown on the main sheet by default (vehicle/driver/entry-exit-
+    time/gross-tare-weight - see fields.INTERNAL_TRACKING_FIELDS), plus a
+    few identifying columns (source file, certificate/reference number,
+    site - see fields.INTERNAL_TRACKING_SHEET_COLUMNS) so a row here can be
+    matched back to its main-sheet certificate without relying on row order.
+
+    Written in the same order as the main sheet's rows (both come from the
+    same already-confidence-sorted `records` list passed into
+    write_records()), so row N here lines up with row N there for a given
+    run - but unlike the סיכום sheet below, this one is plain extracted
+    data, not a live formula, so a later manual edit on the main sheet won't
+    be reflected here without rerunning the pipeline.
+    """
+    ws = wb.create_sheet(_INTERNAL_SHEET_NAME)
+    ws.sheet_view.rightToLeft = True
+
+    keys = [key for key, _label in INTERNAL_TRACKING_SHEET_COLUMNS]
+    headers = [label for _key, label in INTERNAL_TRACKING_SHEET_COLUMNS]
+
+    ws.append(headers)
+    ws.row_dimensions[1].height = 22
+    for cell in ws[1]:
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.fill = _HEADER_FILL
+        cell.border = _THIN_BORDER
+
+    for row_idx, record in enumerate(records, start=2):
+        ws.append([record.get(key, "") for key in keys])
+        for col_idx in range(1, len(keys) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = _DATA_FONT
+            cell.alignment = Alignment(horizontal="right")
+            cell.border = _THIN_BORDER
+            if row_idx % 2 == 1:
+                cell.fill = _BANDED_ROW_FILL
+
+    for col_idx, column_cells in enumerate(ws.columns, start=1):
+        longest = max((len(str(c.value)) if c.value is not None else 0) for c in column_cells)
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(longest + 2, 10), 30)
+
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
 
 
 def read_existing_records(path: Path) -> List[dict]:
@@ -169,6 +237,14 @@ def read_existing_records(path: Path) -> List[dict]:
     Returns [] if the file doesn't exist, isn't a valid workbook, or has no
     main sheet - a missing/unreadable file is treated as an empty starting
     point, never an error, since callers use this only to seed a fresh batch.
+
+    Matches columns by their header-row TEXT against EXCEL_COLUMNS's current
+    labels (falling back to _LEGACY_HEADER_ALIASES for a header this version
+    renamed/dropped), not by fixed column position - so a file written by an
+    older version of this pipeline, with a different column order/count
+    (e.g. before the 2026-08-30 core-column reorder), is still read
+    correctly for whatever columns still match by name, instead of silently
+    misaligning every value one version's reorder to the left/right.
     """
     if not path.is_file():
         return []
@@ -180,14 +256,19 @@ def read_existing_records(path: Path) -> List[dict]:
         return []
 
     ws = wb[_MAIN_SHEET_NAME]
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    label_to_key = dict(zip(_HEADERS, _KEYS))
+    col_keys = [label_to_key.get(label, _LEGACY_HEADER_ALIASES.get(label)) for label in header_row]
+
     records = []
-    for row in ws.iter_rows(min_row=2, max_col=len(_KEYS), values_only=True):
+    for row in ws.iter_rows(min_row=2, max_col=len(col_keys), values_only=True):
         if all(value is None for value in row):
             continue
-        record = {
-            key: (value if key == "quantity" and value is not None else ("" if value is None else str(value)))
-            for key, value in zip(_KEYS, row)
-        }
+        record = {}
+        for key, value in zip(col_keys, row):
+            if key is None:
+                continue  # a column this version no longer recognizes
+            record[key] = value if key == "quantity" and value is not None else ("" if value is None else str(value))
         records.append(record)
     return records
 

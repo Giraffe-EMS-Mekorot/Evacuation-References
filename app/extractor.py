@@ -28,7 +28,10 @@ from PIL import Image
 
 from . import config
 from .derive import derive_year_month
+from .excel_writer import parse_quantity
 from .fields import (
+    CERT_ROLE_COMPLETION,
+    CERT_ROLE_WEIGHING,
     CONFIDENCE_LEVELS,
     DOCUMENT_TYPE_OTHER,
     FIELD_DEFS,
@@ -72,16 +75,27 @@ _MIN_PLAUSIBLE_YEAR = 2015
 # Core fields (per the original spec) whose absence should always get a
 # record flagged for manual review, regardless of what the model itself
 # reports for רמת_ביטחון. year/month are derived together from the same
-# "date" value, so they're always both blank or both filled - one check
-# covers both, labeled as the pair for a clearer note.
+# "date" value (see derive_year_month) and aren't their own EXCEL_COLUMNS
+# entry any more (the raw "date" field is, instead) - the check still keys
+# off "year" internally, just labeled here to match the column a reviewer
+# actually sees.
 _CORE_FIELD_LABELS = [
     ("waste_type", "סוג הפסולת"),
     ("quantity", "כמות"),
     ("unit", "יחידת מידה"),
     ("site", "אתר/יחידה"),
     ("region", "מרחב"),
-    ("year", "שנה/חודש"),
+    ("year", "תאריך"),
 ]
+
+# Tolerance (in the certificate's own unit, typically ק"ג) for the
+# ברוטו-טרה=נטו arithmetic sanity check - see _flag_gross_tare_mismatch.
+# Covers rounding on the certificate itself, not a real discrepancy.
+_GROSS_TARE_TOLERANCE = 1.0
+# Tolerance for cross-document quantity matching between a weighing
+# certificate and its paired work-completion approval - see
+# _cross_check_document_pair. Same rounding-margin reasoning as above.
+_PAIR_QUANTITY_TOLERANCE = 1.0
 
 _SYSTEM_PROMPT = (
     "אתה עוזר שמחלץ מידע מובנה מתעודות פינוי פסולת (PDF או תמונה סרוקה/מצולמת, "
@@ -111,7 +125,16 @@ _SYSTEM_PROMPT = (
     "לפני שאתה קובע את שדה הכמות הסופי - זהו השדה הכי קריטי לדיוק בתעודה - עבור "
     "פעם נוספת על כל ספרה שקראת ווודא שלא התבלבלת בין ספרות דומות בכתב יד "
     "(0/6/8, 1/7, 3/8, 4/9) ושמיקום הנקודה העשרונית נכון; אין צורך לכתוב את תהליך "
-    "הבדיקה הזה בשום שדה - רק לוודא אותו לפני שאתה עונה. "
+    "הבדיקה הזה בשום שדה - רק לוודא אותו לפני שאתה עונה. אותה זהירות חלה גם על "
+    "שדות ברוטו/טרה כשהם קיימים בתעודה - הם נבדקים בקוד מול הכמות (נטו) שדווחה. "
+    "בחלק מהספקים (לא כולם) מופיעים זוגות של שני מסמכים סמוכים המתעדים את אותה "
+    "פעולת פינוי: 'תעודת שקילה/משלוח' ממוחשבת עם ברוטו/טרה/נטו ומספר תעודה, "
+    "ולידה 'אישור ביצוע עבודה/הטמנה' כתוב-יד עם מספר אסמכתא (המפנה למספר "
+    "התעודה של תעודת השקילה), אתר/מיקום ביצוע, וחתימה. סמן בשדה cert_role את "
+    "המבנה של העמוד הזה לפי המבנה/הכותרות שלו בפועל בלבד - לא לפי שם הספק, "
+    "ובלי קשר לשאלה אם יש עמוד סמוך מתאים (זו בדיקה נפרדת שנעשית בקוד): גם אם "
+    "אינך יודע אם קיים עמוד מקושר, אם התעודה הזו לבדה מציגה מבנה מובהק של אחד "
+    "משני הסוגים - סמן אותו. ברוב התעודות אין מבנה כזה כלל - אז השאר ריק. "
     "בשדה רמת_ביטחון דווח את הערכתך לגבי איכות הקריאה של התעודה כולה. "
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
@@ -288,6 +311,150 @@ def _flag_unreasonable_date(record: dict) -> None:
     record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
 
 
+def _flag_gross_tare_mismatch(record: dict) -> None:
+    """Sanity-checks ברוטו - טרה = נטו whenever both gross_weight and
+    tare_weight are present on a record, regardless of whether it's part of
+    a weighing/completion document pair (see _cross_check_document_pair,
+    which is a separate, pair-level check) - the arithmetic must hold on any
+    single certificate that reports all three values.
+
+    Only runs when the unit is blank or ק"ג (gross/tare are almost always
+    reported in ק"ג on a weighing slip - see gross_weight/tare_weight's
+    FIELD_DEFS description) - _GROSS_TARE_TOLERANCE is a fixed ק"ג margin,
+    so comparing it against, say, טון would be meaningless.
+    """
+    if record.get("unit") not in ("", 'ק"ג'):
+        return
+    gross = parse_quantity(record.get("gross_weight"))
+    tare = parse_quantity(record.get("tare_weight"))
+    net = parse_quantity(record.get("quantity"))
+    if gross is None or tare is None or net is None:
+        return
+    gap = (gross - tare) - net
+    if abs(gap) <= _GROSS_TARE_TOLERANCE:
+        return
+    note = (
+        f'פער בין ברוטו-טרה לנטו המדווח: {abs(gap):g} ק"ג '
+        f"(ברוטו={gross:g}, טרה={tare:g}, נטו={net:g})"
+    )
+    record["confidence"] = "נמוכה"
+    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+
+
+def _append_container_note(record: dict) -> None:
+    """Folds container_count/container_type into notes instead of leaving
+    them as their own column - per spec, this pair of fields is meant to be
+    "collected but appended to notes", not a main-sheet/tracking-sheet
+    column (see fields.py's FIELD_DEFS descriptions for both).
+    """
+    count = (record.get("container_count") or "").strip()
+    ctype = (record.get("container_type") or "").strip()
+    if not count and not ctype:
+        return
+    if count and ctype:
+        note = f"{count} מכולות ({ctype})"
+    elif count:
+        note = f"{count} מכולות"
+    else:
+        note = f"מכולה: {ctype}"
+    existing = record.get("notes") or ""
+    if note in existing:
+        return
+    record["notes"] = f"{existing} | {note}" if existing else note
+
+
+def _normalize_reference(value: str) -> str:
+    """Normalizes a certificate/reference id for equality comparison in
+    _cross_check_document_pair - a weighing certificate's own
+    certificate_number and a paired completion approval's reference_number
+    should refer to the same real-world id, but formatting can differ
+    (leading zeros, surrounding whitespace, case on an alphanumeric prefix
+    like "MNM-142496"). Purely numeric ids are compared as integers (drops
+    leading zeros); anything else is compared as a stripped, case-folded
+    string.
+    """
+    text = (value or "").strip()
+    if text.isdigit():
+        return str(int(text))
+    return text.casefold()
+
+
+def _cross_check_document_pair(weighing: dict, completion: dict) -> None:
+    """Cross-checks one detected (CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION)
+    pair - see _detect_and_cross_check_pairs, which finds the pairs this is
+    called on. Three independent checks, each skipped (not flagged) when
+    either side is missing the relevant field, rather than guessing at a
+    mismatch from incomplete data:
+
+      1. Reference number: the weighing doc's own certificate_number should
+         equal the completion doc's reference_number (its מספר_אסמכתא is
+         meant to point back at the weighing certificate's own number).
+      2. Quantity: both documents should report the same net weight, even
+         if worded differently (see quantity's FIELD_DEFS description) -
+         compared within _PAIR_QUANTITY_TOLERANCE for rounding.
+      3. Date: both documents describe the same real-world pickup/disposal
+         event, so their dates should match.
+
+    On any mismatch, both records in the pair are downgraded to "נמוכה" with
+    one note listing exactly what didn't match (per spec, e.g. "אסמכתא לא
+    תואמת: תעודת שקילה=15077, אישור ביצוע=15078"). When every check that
+    could run passed, nothing is added - per spec, a clean cross-check is
+    the "high confidence, no special note needed" case, not something that
+    needs its own confirmation note.
+    """
+    issues = []
+
+    w_ref = (weighing.get("certificate_number") or "").strip()
+    c_ref = (completion.get("reference_number") or "").strip()
+    if w_ref and c_ref and _normalize_reference(w_ref) != _normalize_reference(c_ref):
+        issues.append(f"אסמכתא לא תואמת: תעודת שקילה={w_ref}, אישור ביצוע={c_ref}")
+
+    w_qty = parse_quantity(weighing.get("quantity"))
+    c_qty = parse_quantity(completion.get("quantity"))
+    if w_qty is not None and c_qty is not None and abs(w_qty - c_qty) > _PAIR_QUANTITY_TOLERANCE:
+        issues.append(f"כמות לא תואמת: תעודת שקילה={w_qty:g}, אישור ביצוע={c_qty:g}")
+
+    w_date = (weighing.get("date") or "").strip()
+    c_date = (completion.get("date") or "").strip()
+    if w_date and c_date and w_date != c_date:
+        issues.append(f"תאריך לא תואם: תעודת שקילה={w_date}, אישור ביצוע={c_date}")
+
+    if not issues:
+        return
+    note = "; ".join(issues)
+    for record in (weighing, completion):
+        record["confidence"] = "נמוכה"
+        if note not in (record.get("notes") or ""):
+            record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+
+
+def _detect_and_cross_check_pairs(records: List[dict]) -> None:
+    """Scans one PDF's page records for the two-document weighing+completion
+    pattern (see fields.CERT_ROLE_WEIGHING/CERT_ROLE_COMPLETION) and
+    cross-checks any adjacent pair found, in either order (a weighing slip
+    followed by its completion approval, or the reverse).
+
+    Deliberately supplier-agnostic: cert_role is set by the model from each
+    page's own structure/headers (see that field's FIELD_DEFS description),
+    never from a vendor name, so this same logic covers any supplier using
+    this pattern, including one not seen before.
+
+    Only strictly adjacent pages are considered (matching the spec's "שני
+    עמודים סמוכים") - a completion approval that arrives without a
+    neighboring weighing certificate (or vice versa) is simply left alone,
+    processed like any other standalone certificate: no cross-check, and no
+    failure. Not applied across separate uploaded files - only within one
+    PDF's own pages, which is the only case "adjacent pages" can mean.
+    """
+    for i in range(len(records) - 1):
+        a, b = records[i], records[i + 1]
+        role_a, role_b = a.get("cert_role"), b.get("cert_role")
+        if role_a == CERT_ROLE_WEIGHING and role_b == CERT_ROLE_COMPLETION:
+            _cross_check_document_pair(a, b)
+        elif role_a == CERT_ROLE_COMPLETION and role_b == CERT_ROLE_WEIGHING:
+            _cross_check_document_pair(b, a)
+
+
 def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
     """Sends one already-loaded page image to Claude and returns its
     extracted fields. The single-page core that both a plain image file and
@@ -335,6 +502,16 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
         _flag_unclassified_waste_type(record)
         record["year"], record["month"] = derive_year_month(record["date"])
         _flag_unreasonable_date(record)
+        # Display/fallback id for the "מספר תעודה/אסמכתא" column - most
+        # certificates only ever have certificate_number; reference_number
+        # is the fallback for one that instead labels its own id "אסמכתא"
+        # (distinct from reference_number's cross-document-pairing role -
+        # see _detect_and_cross_check_pairs).
+        record["certificate_or_reference"] = (
+            record.get("certificate_number") or record.get("reference_number") or ""
+        )
+        _flag_gross_tare_mismatch(record)
+        _append_container_note(record)
         _enforce_core_field_confidence(record)
     # Not an EXCEL_COLUMNS field - excel_writer.py's row-writing only reads
     # keys it knows about, so this rides along harmlessly for callers (like
@@ -378,6 +555,7 @@ def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] 
                 if total > 1:
                     _append_page_note(record, index + 1, total)
                 records.append(record)
+            _detect_and_cross_check_pairs(records)
             return records
         finally:
             pdf.close()
