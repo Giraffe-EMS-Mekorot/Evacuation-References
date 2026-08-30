@@ -62,7 +62,7 @@ def process_files(
     waste quantity in the first place.
 
     Also runs each certificate record's free-text name fields (site/
-    reference_type) through NameNormalizer, and its quantity through a
+    supplier_or_carrier) through NameNormalizer, and its quantity through a
     historical-outlier sanity check - both bootstrapped from whatever's
     already in output/ריכוז_תעודות.xlsx (see app/normalize.py and
     app/quantity_check.py). This applies uniformly to both the CLI and the
