@@ -626,6 +626,14 @@ def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] 
                 record["source_file"] = path.name
                 if total > 1:
                     _append_page_note(record, index + 1, total)
+                    # Lets excel_writer.py show exactly which page of a
+                    # multi-page PDF a row came from (e.g. "קובץ.pdf (עמוד
+                    # 7)") in the "קובץ מקור" column itself, not just buried
+                    # in the notes text above - so a reviewer chasing a
+                    # mistake can jump straight to the right page. Only set
+                    # for a multi-page file, same gate as the note above -
+                    # a single-page PDF's source_file needs no page marker.
+                    record["page_number"] = index + 1
                 records.append(record)
             _detect_and_cross_check_pairs(records)
             return records

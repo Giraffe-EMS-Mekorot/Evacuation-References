@@ -1,6 +1,7 @@
 """Writes extracted certificate records to the consolidated output Excel file."""
+import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -69,6 +70,15 @@ _LEGACY_HEADER_ALIASES = {
 
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
 _HEADERS = [label for _key, label in EXCEL_COLUMNS]
+_INTERNAL_KEYS = [key for key, _label in INTERNAL_TRACKING_SHEET_COLUMNS]
+
+# Matches the "(עמוד N)" suffix _source_file_display() appends to a
+# multi-page-PDF record's displayed "קובץ מקור" text (see that function) -
+# used by read_existing_records() to split a previously-written cell back
+# into its plain source_file and page_number, so re-extending a project
+# doesn't corrupt either (see that function's docstring for why this
+# matters: the hyperlink target is built from the plain filename alone).
+_SOURCE_FILE_PAGE_RE = re.compile(r"^(?P<filename>.+) \(עמוד (?P<page>\d+)\)$")
 
 # Rows needing the most urgent review should be the first thing a reviewer
 # sees, not buried after everything else - note this is the opposite order
@@ -111,17 +121,62 @@ def _esc(text: str) -> str:
     return text.replace('"', '""')
 
 
+def _source_file_display(record: dict) -> str:
+    """Composes the "קובץ מקור" column's displayed text: the plain filename,
+    plus a page-number suffix when this record came from a specific page of
+    a multi-page PDF (record["page_number"], set by
+    extractor.extract_certificate_pages() only when the source PDF had more
+    than one page) - e.g. "חשבונית_ינואר.pdf (עמוד 7)", so a reviewer
+    chasing a mistake can go straight to the right page instead of
+    searching the whole file.
+
+    Deliberately separate from the underlying record["source_file"] value
+    itself, which stays a plain filename everywhere else - both the
+    hyperlink target built right after this in write_records() (resolved as
+    a real path under input/) and duplicate_check.py's origin check
+    (_is_manual_excel_record's .endswith(".xlsx") test) need the plain
+    filename, not this display string.
+    """
+    filename = record.get("source_file", "")
+    page_number = record.get("page_number")
+    if filename and page_number:
+        return f"{filename} (עמוד {page_number})"
+    return filename
+
+
+def _split_source_file_display(text: str) -> Tuple[str, str]:
+    """Inverse of _source_file_display() - splits a "קובץ מקור" cell's text
+    back into (filename, page_number), for read_existing_records() to
+    reconstruct record["source_file"]/record["page_number"] correctly when
+    re-reading a previously-written file (see that function). A cell with no
+    "(עמוד N)" suffix (a single-page file, or one written before this
+    2026-09-01 feature) returns (text, "") unchanged.
+    """
+    match = _SOURCE_FILE_PAGE_RE.match(text or "")
+    if match:
+        return match.group("filename"), match.group("page")
+    return text or "", ""
+
+
 def write_records(records: List[dict], output_path: Path) -> None:
     """Writes one row per record plus a live-formula "סיכום" sheet, overwriting
     any existing file.
 
-    Column order/headers on the main sheet come from fields.EXCEL_COLUMNS. Rows
-    whose רמת_ביטחון is "נמוכה"/"בינונית" are highlighted red/yellow so they're
-    easy to find for manual review; that always wins over the plain banded-row
+    Column order/headers on the main sheet come from fields.EXCEL_COLUMNS
+    (as of 2026-09-01: מרחב | אתר/מקור | אתר קולט | תאריך | מספר תעודה/
+    אסמכתא | סוג הפסולת | כמות | יחידת מידה | הערות | קובץ מקור - רמת
+    ביטחון is deliberately not one of these any more, see that list's own
+    comment and _write_internal_tracking_sheet() below). Rows whose
+    רמת_ביטחון is "נמוכה"/"בינונית" are still highlighted red/yellow so
+    they're easy to find for manual review, even without their own text
+    column spelling out why - that always wins over the plain banded-row
     background. The source-file column is a hyperlink to the original file
-    under input/. Rows are written in confidence order (נמוכה first) - see
-    sort_by_confidence() - so the ones needing review are at the top, not
-    scattered through the sheet in whatever order they were processed.
+    under input/, and its displayed text includes a page-number suffix for
+    a record from a specific page of a multi-page PDF (see
+    _source_file_display()) - the hyperlink itself still targets the plain
+    file, unaffected. Rows are written in confidence order (נמוכה first) -
+    see sort_by_confidence() - so the ones needing review are at the top,
+    not scattered through the sheet in whatever order they were processed.
     """
     records = sort_by_confidence(records)
 
@@ -145,6 +200,8 @@ def write_records(records: List[dict], output_path: Path) -> None:
             if key == "quantity":
                 parsed = parse_quantity(raw)
                 row_values.append(parsed if parsed is not None else raw)
+            elif key == "source_file":
+                row_values.append(_source_file_display(record))
             else:
                 row_values.append(raw)
         ws.append(row_values)
@@ -190,9 +247,12 @@ def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
     """Writes the "מעקב פנימי" sheet: fields collected from the certificate
     but not shown on the main sheet by default (vehicle/driver/entry-exit-
     time/gross-tare-weight - see fields.INTERNAL_TRACKING_FIELDS), plus a
-    few identifying columns (source file, certificate/reference number,
-    site - see fields.INTERNAL_TRACKING_SHEET_COLUMNS) so a row here can be
-    matched back to its main-sheet certificate without relying on row order.
+    few identifying columns and, as of 2026-09-01, רמת ביטחון itself (source
+    file, certificate/reference number, site, confidence - see
+    fields.INTERNAL_TRACKING_SHEET_COLUMNS) so a row here can be matched
+    back to its main-sheet certificate without relying on row order, and so
+    confidence isn't lost now that it's no longer a main-sheet column (see
+    write_records()'s own docstring).
 
     Written in the same order as the main sheet's rows (both come from the
     same already-confidence-sorted `records` list passed into
@@ -216,7 +276,7 @@ def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
         cell.border = _THIN_BORDER
 
     for row_idx, record in enumerate(records, start=2):
-        ws.append([record.get(key, "") for key in keys])
+        ws.append([_source_file_display(record) if key == "source_file" else record.get(key, "") for key in keys])
         for col_idx in range(1, len(keys) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.font = _DATA_FONT
@@ -280,6 +340,20 @@ def read_existing_records(path: Path) -> List[dict]:
         for key, value in zip(col_keys, row):
             if key is None:
                 continue  # a column this version no longer recognizes
+            if key == "source_file":
+                # Split a possible "(עמוד N)" suffix back out - see
+                # _source_file_display()/_split_source_file_display() - so
+                # record["source_file"] stays the plain filename this
+                # module's own hyperlink-building and
+                # duplicate_check._is_manual_excel_record() both need,
+                # while record["page_number"] is preserved too (so
+                # rewriting this record later reproduces the same display
+                # text instead of silently losing the page reference).
+                filename, page_number = _split_source_file_display(None if value is None else str(value))
+                record["source_file"] = filename
+                if page_number:
+                    record["page_number"] = page_number
+                continue
             record[key] = value if key == "quantity" and value is not None else ("" if value is None else str(value))
 
         legacy_year = record.pop(_LEGACY_YEAR_KEY, None)
@@ -295,8 +369,8 @@ def read_existing_records(path: Path) -> List[dict]:
     return records
 
 
-def _range_ref(col_letter: str) -> str:
-    return f"'{_MAIN_SHEET_NAME}'!${col_letter}$2:${col_letter}${_MAX_DATA_ROW}"
+def _range_ref(col_letter: str, sheet_name: str = _MAIN_SHEET_NAME) -> str:
+    return f"'{sheet_name}'!${col_letter}$2:${col_letter}${_MAX_DATA_ROW}"
 
 
 def _write_summary_sheet(wb: Workbook) -> None:
@@ -311,14 +385,25 @@ def _write_summary_sheet(wb: Workbook) -> None:
     waste_col = get_column_letter(_KEYS.index("waste_type") + 1)
     qty_col = get_column_letter(_KEYS.index("quantity") + 1)
     unit_col = get_column_letter(_KEYS.index("unit") + 1)
-    conf_col = get_column_letter(_KEYS.index("confidence") + 1)
     src_col = get_column_letter(_KEYS.index("source_file") + 1)
+    # confidence is no longer a main-sheet column (2026-09-01, see
+    # fields.EXCEL_COLUMNS's own note) - its breakdown below now reads from
+    # the "מעקב פנימי" sheet instead, which always carries it (see
+    # fields.INTERNAL_TRACKING_SHEET_COLUMNS) and is written in the exact
+    # same row order as the main sheet for this run (both iterate the same
+    # already-sorted `records` list - see write_records()). This does mean
+    # a row added BY HAND directly on the main sheet after the fact (the
+    # padded-range design exists specifically to tolerate that - see the
+    # module docstring above) has no matching confidence cell on the
+    # tracking sheet, so it won't be counted here - an accepted, documented
+    # gap, not a silent one.
+    conf_col = get_column_letter(_INTERNAL_KEYS.index("confidence") + 1)
 
     region_range = _range_ref(region_col)
     waste_range = _range_ref(waste_col)
     qty_range = _range_ref(qty_col)
     unit_range = _range_ref(unit_col)
-    conf_range = _range_ref(conf_col)
+    conf_range = _range_ref(conf_col, _INTERNAL_SHEET_NAME)
     src_range = _range_ref(src_col)
 
     def q(text: str) -> str:

@@ -339,16 +339,29 @@ def empty_record(filename: str = "", error: str = "") -> dict:
     return record
 
 
+# Order/headers as of 2026-09-01 - right-to-left reading order in the RTL
+# main sheet is LEFT-to-right through this list (first entry = column A =
+# visually rightmost, per excel_writer.py's freeze_panes note), confirmed
+# with the user as: מרחב | אתר/מקור | אתר קולט | תאריך | מספר תעודה/אסמכתא |
+# סוג הפסולת | כמות | יחידת מידה | הערות | קובץ מקור.
+#
+# "confidence"/רמת ביטחון is deliberately NOT a main-sheet column any more -
+# moved to INTERNAL_TRACKING_SHEET_COLUMNS below (see excel_writer.py's
+# _write_summary_sheet, which now reads its confidence-breakdown formulas
+# from that sheet instead of this one). The main sheet's row-level red/
+# yellow confidence FILL (see excel_writer.write_records) is unaffected -
+# it reads record["confidence"] in Python directly, not a written column -
+# so a low/medium-confidence row is still visually flagged even without the
+# text column spelling out why.
 EXCEL_COLUMNS = [
+    ("region", "מרחב"),
+    ("site", "אתר/מקור"),
+    ("supplier_or_carrier", "אתר קולט"),
     ("date", "תאריך"),
     ("certificate_or_reference", "מספר תעודה/אסמכתא"),
-    ("supplier_or_carrier", "אתר קולט"),
-    ("site", "אתר/מקור"),
     ("waste_type", "סוג הפסולת"),
     ("quantity", 'כמות (נטו)'),
     ("unit", "יחידת מידה"),
-    ("region", "מרחב"),
-    ("confidence", "רמת ביטחון"),
     ("notes", "הערות"),
     ("source_file", "קובץ מקור"),
 ]
@@ -371,8 +384,15 @@ INTERNAL_TRACKING_FIELDS = [
 # few identifying columns prepended to INTERNAL_TRACKING_FIELDS, since that
 # sheet is physically separate from the main one and needs to let a reviewer
 # find the right row without relying on row order alone.
+#
+# "confidence" lives here (2026-09-01) rather than on the main sheet - see
+# EXCEL_COLUMNS's own note above. Placed right after the identifying columns
+# (source_file/certificate_or_reference/site), before the plain tracking
+# fields, so it reads as "here's who/what this row is, and how sure we were
+# about it" before the raw vehicle/time/weight data.
 INTERNAL_TRACKING_SHEET_COLUMNS = [
     ("source_file", "קובץ מקור"),
     ("certificate_or_reference", "מספר תעודה/אסמכתא"),
     ("site", "אתר/מקור"),
+    ("confidence", "רמת ביטחון"),
 ] + INTERNAL_TRACKING_FIELDS

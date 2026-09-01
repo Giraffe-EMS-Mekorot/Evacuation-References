@@ -88,6 +88,13 @@ _ACCENT_GOLD = "#D4A24C"
 # targets the card's own key rather than a fixed/generic selector.
 _UPLOAD_AREA_BORDER = _ACCENT_GOLD
 _UPLOAD_AREA_BACKGROUND = "#FBF1DE"
+# "confidence" is no longer part of fields.EXCEL_COLUMNS (2026-09-01 - see
+# that list's own comment: it moved to the output file's "מעקב פנימי" sheet
+# instead), but this review UI still needs to show/edit it directly - core
+# reviewer workflow, unrelated to the written file's own column layout. Used
+# below to re-insert it into the results table and the source-page-viewer's
+# field list, both of which used to get it for free from EXCEL_COLUMNS.
+_CONFIDENCE_COLUMN = ("confidence", "רמת ביטחון")
 # Symbols shown in the read-only "status" column next to רמת ביטחון, in
 # addition to (not instead of) that column's own text value and the existing
 # background-fill coloring - a second, non-color signal for the same
@@ -707,6 +714,14 @@ else:
 
         header_by_key = dict(EXCEL_COLUMNS)
         keys = [key for key, _label in EXCEL_COLUMNS]
+        # Re-insert confidence for on-screen display/editing only - see
+        # _CONFIDENCE_COLUMN's own comment - in the same position it always
+        # occupied (right before notes) so nothing downstream (display_keys'
+        # status-symbol insertion, the data_editor columns, the merge-back
+        # loop) needs to know this changed.
+        header_by_key[_CONFIDENCE_COLUMN[0]] = _CONFIDENCE_COLUMN[1]
+        notes_pos = keys.index("notes")
+        keys = keys[:notes_pos] + [_CONFIDENCE_COLUMN[0]] + keys[notes_pos:]
         if show_internal_tracking:
             header_by_key.update(INTERNAL_TRACKING_FIELDS)
             keys = keys + [key for key, _label in INTERNAL_TRACKING_FIELDS]
@@ -903,7 +918,16 @@ else:
                     icon=":material/info:",
                 )
         with fields_col:
-            fields_to_show = EXCEL_COLUMNS + (INTERNAL_TRACKING_FIELDS if show_internal_tracking else [])
+            # confidence re-inserted here too, right before notes, for the
+            # same reason as the results table above - see
+            # _CONFIDENCE_COLUMN's comment.
+            notes_pos = next(i for i, (key, _label) in enumerate(EXCEL_COLUMNS) if key == "notes")
+            fields_to_show = (
+                EXCEL_COLUMNS[:notes_pos]
+                + [_CONFIDENCE_COLUMN]
+                + EXCEL_COLUMNS[notes_pos:]
+                + (INTERNAL_TRACKING_FIELDS if show_internal_tracking else [])
+            )
             for key, label in fields_to_show:
                 st.write(f"**{label}:** {selected_record.get(key) or '—'}")
 
