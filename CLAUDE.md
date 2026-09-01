@@ -444,6 +444,121 @@ model call that specifically audits closed-list fields against "is this
 literally written on the document, or inferred?" rather than further prompt
 tuning on the extraction call itself.
 
+## Four real-world-driven improvements (2026-09-01)
+
+**1. Invoice (חשבונית) filtering.** Extended the existing, already-model-driven
+`document_type` classification (see DOCUMENT_TYPE_OTHER above) to explicitly
+recognize an invoice pattern - a title containing "חשבונית", multiple line-item
+rows, price/מע"מ columns, a financial summary (the real example: "ק.מ.מ. מפעלי
+מחזור") - and classify it as `DOCUMENT_TYPE_OTHER`, same as an internal
+billing/credit note. Pure prompt-engineering (fields.py's `document_type`
+field description + extractor.py's `_extract_page` skip-path was already
+generic), no new code path - verified against a real certificate (not an
+invoice) that it still correctly returns `DOCUMENT_TYPE_CERTIFICATE` and
+doesn't over-trigger.
+
+**2. שטר מטען (bill of lading) with an explicit "0" weight.** A document like
+a טיקטראק שטר מטען that accompanies a shipment *before* weighing has its own
+weight/volume field literally showing "0" - not blank, and not a real zero
+quantity. A new `cert_role` value, `CERT_ROLE_BILL_OF_LADING_ZERO`
+(fields.py), is a third, unrelated option alongside the existing
+WEIGHING/COMPLETION pair pattern (see the 2026-08-30 section above) - model-
+classified from the page's own structure, same as those two. When set:
+- The model is instructed (system prompt + `quantity`'s field description)
+  to ignore the literal "0" and instead look for a textual estimate
+  elsewhere on the page (e.g. a "פרטים" field like "פינוי מכולה 12 מ\"ק") and
+  extract a real number+unit from it into `quantity`/`unit`, exactly as if
+  that number had been in the weighing table itself.
+- `extractor._flag_bill_of_lading_estimate()` always escalates such a record
+  to at least "בינונית" with a "הערכה משטר מטען - טרם נשקל בפועל" note - the
+  model reading the page perfectly doesn't make an estimate a real weighing.
+- `pipeline._cross_check_bill_of_lading_estimates()` runs once per
+  `process_files()` batch (across every file in the batch, NOT just one
+  PDF's adjacent pages - contrast with `extractor._detect_and_cross_check_pairs`,
+  which is same-PDF/adjacent-page only) looking for a real weighing record
+  (positive gross/tare, or just a positive quantity - see
+  `_is_real_weighing_candidate`) matching the estimate on vehicle_number +
+  site + date within 3 days. Deliberately does NOT require a matching
+  certificate/reference number - the spec's own real scenario is two
+  different systems (the carrier's שטר מטען vs. the receiving site's own
+  weighing slip) assigning their own unrelated ids to the same shipment.
+  On a match, the estimate's quantity/unit are overwritten with the real
+  weighing's, noted, and the real record is left untouched.
+- `derive.parse_date()` (new, additive - `derive_year_month()` itself is
+  untouched to avoid touching this project's most incident-prone piece of
+  date logic, see the 2026-08-30 follow-up above) parses a date string into
+  a real `date` object for this day-level proximity comparison, reused by
+  `duplicate_check.py` below too.
+
+**3. Manual Excel upload (`app/excel_input.py`, new module).**
+streamlit_app.py's existing upload area now also accepts `.xlsx` (detected
+by extension, `_MANUAL_EXCEL_EXTENSIONS`) alongside PDF/image files -
+`read_manual_excel()` reads it directly via openpyxl, no Claude call at all.
+Column matching is by header TEXT (`_HEADER_TO_KEY`), not position, so an
+unrecognized "helper" column (dropdown source lists like "אגפים"/"סוגי
+פסולת" sitting off to the side of the real table) is silently never read -
+no separate skip-list needed. Deliberately bypasses `app.pipeline.process_files`
+entirely (NameNormalizer, quantity-history outlier check, gross/tare check,
+closed-list enforcement, date-plausibility check all exist to catch a
+*vision model's* mistakes; a manually-typed row was never extracted by one)
+- streamlit_app.py appends these records straight into
+`st.session_state.records`, alongside whatever `process_files()` returned
+for any PDF/images in the same batch. Confidence defaults to "גבוהה" (a
+human already reviewed this data) except a missing year, which is left
+blank (never guessed from the sheet name) with a "שנה חסרה במקור" note and
+"נמוכה" confidence. Quantity is kept EXACTLY as the cell holds it - a human
+annotation like "כ-1.8" is never rejected/cleaned the way an unparseable
+AI-extracted value is (see streamlit_app.py's own quantity-reparse block,
+which now explicitly only runs on `process_files()`'s output, not manual
+records) - `excel_writer.write_records()`'s existing parse-or-fall-back-to-
+raw-string behavior already renders this correctly with no extra code.
+
+This forced a related fix in streamlit_app.py's results table: "כמות (נטו)"
+was `st.column_config.NumberColumn`, which can't hold a string like "כ-1.8"
+- it's now `TextColumn` (`_display_quantity()` still right-formats a real
+float to 2 decimals for the common case), and the edit-merge-back logic
+uses `parse_quantity()` with a raw-string fallback instead of an
+unconditional `float(value)`, so a normal numeric edit still round-trips as
+a float while non-numeric manual text survives being displayed and re-edited.
+
+**4. Duplicate detection between a manual Excel row and a later PDF scan
+(`app/duplicate_check.py`, new module).** The same shipment can get reported
+twice - once by hand ahead of time, once for real when the scanned
+certificate arrives. `flag_potential_duplicates()` compares every
+(manual-Excel, AI-extracted) pair - origin is inferred from `source_file`'s
+own extension (`_is_manual_excel_record`), not a separate tracked field, so
+it works identically on records built this session and on rows read back
+from a previously-saved project file - for a close/equal date (3 days),
+identical site + waste_type, and a close/equal quantity (5%). A match never
+merges or deletes anything (too dangerous to automate) - it appends a
+"⚠ כפילות אפשרית" note to BOTH rows, referencing the OTHER row by source
+file name (+ date), deliberately NOT a spreadsheet row number: row position
+shifts on every confidence re-sort (`sort_by_confidence`, which
+`write_records()` always applies) or later batch, so a numeric reference
+would go stale almost immediately - a source-file reference stays valid and
+is idempotent to boot (calling this again on unchanged data doesn't
+re-append the note). Wired into streamlit_app.py right before both of its
+`write_records()` calls (after processing a new batch, and after an
+edit-merge-back), since either can newly create or resolve an apparent
+match. CLI (main.py) is untouched - it has no Excel-upload code path at all,
+so there's nothing for this to cross-reference there.
+
+**Testing note:** all four were verified with fabricated-record pure-function
+tests (the bill-of-lading flag/cross-check, the manual-Excel column-mapping/
+edge-cases, the duplicate-flagging match/no-match/idempotency cases) plus a
+full `write_records()`/`read_existing_records()` Excel round-trip with mixed
+numeric/text quantities, plus a `streamlit.testing.v1.AppTest` run seeding
+`session_state.records` with a mix of normal/manual/flagged-duplicate rows to
+confirm the results table renders without exception. No real חשבונית or שטר
+מטען certificate exists in this project's `input/` to run a live extraction
+call against (unlike the gross/tare/cert_role work on 2026-08-30, which had
+one) - #1 and #2's PROMPT changes are therefore unverified against a real
+matching document; what WAS run live is a single real page from an existing
+certificate (`מחזור אלקטרוניקה אחיסמך 2025.pdf`, page 1) to confirm the
+system prompt/field-description additions don't regress ordinary extraction
+- it still returned `DOCUMENT_TYPE_CERTIFICATE` with `cert_role` correctly
+blank.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This

@@ -82,7 +82,18 @@ DOCUMENT_TYPES = [DOCUMENT_TYPE_CERTIFICATE, DOCUMENT_TYPE_OTHER]
 # certificates aren't part of this pattern at all.
 CERT_ROLE_WEIGHING = "תעודת שקילה/משלוח"
 CERT_ROLE_COMPLETION = "אישור ביצוע עבודה/הטמנה"
-CERT_ROLES = [CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION]
+# A third, unrelated cert_role value (2026-09-01): a "שטר מטען" (bill of
+# lading, e.g. from a system like טיקטראק) that accompanies a shipment
+# *before* it's actually weighed - its own weight/volume field explicitly
+# contains "0" (not blank) for that reason, not because the quantity really
+# is zero. Tagging this lets extractor.py's _flag_bill_of_lading_estimate
+# refuse the literal "0" as quantity and look for a textual estimate
+# instead, and lets pipeline._cross_check_bill_of_lading_estimates later
+# supersede that estimate with a real weighing record's data if one turns up
+# in the same batch (by vehicle+site+nearby date, not a matching id - see
+# that function's docstring for why an id match can't be required here).
+CERT_ROLE_BILL_OF_LADING_ZERO = "שטר מטען (משקל/נפח אפס - הערכה טרם שקילה)"
+CERT_ROLES = [CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION, CERT_ROLE_BILL_OF_LADING_ZERO]
 
 REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
@@ -112,7 +123,10 @@ FIELD_DEFS = [
         + "(תעודת שקילה או תעודת הובלה). "
         + f"'{DOCUMENT_TYPE_OTHER}' - כל מסמך אחר שאינו תעודת פינוי בפועל, גם אם "
         + "יש בו התייחסות לפרויקט/אתר/עבודה - למשל תעודת חיוב/זיכוי פנימית, הזמנת "
-        + f"עבודה, או עמוד ריק/לא רלוונטי. אם הסיווג הוא '{DOCUMENT_TYPE_OTHER}' - "
+        + "עבודה, עמוד ריק/לא רלוונטי, או חשבונית (מסמך עם כמה שורות פריטים, מחירים, "
+        + "עמודת מע\"מ, וסיכום כספי בתחתית - למשל מחברות כמו 'ק.מ.מ. מפעלי מחזור') - "
+        + "חשבונית היא מסמך כספי, לא תעודת פינוי, גם אם מוזכר בה משקל או כמות של פריט. "
+        + f"אם הסיווג הוא '{DOCUMENT_TYPE_OTHER}' - "
         + "עדיין יש למלא שדה זה ואת שדה ההערות (עם תיאור קצר של סוג המסמך, למשל "
         + "'מסמך חיוב/זיכוי פנימי'), אך אין טעם למלא את שאר השדות ואפשר להשאיר "
         + "אותם ריקים.",
@@ -154,7 +168,11 @@ FIELD_DEFS = [
         "תואמים בדיוק את מה שכתוב בתעודה. אם אין בתעודה מספר מדויק אלא רק תיאור "
         "מילולי של הכמות (למשל תעודת הובלה שכתוב בה 'עמוסה 3 מכולות' בלי משקל) - "
         "השאר שדה זה ריק אך כתוב את התיאור המילולי בשדה ההערות, כדי שהמידע לא "
-        "יאבד לגמרי. אם אין שום אינדיקציה לכמות - השאר ריק ואל תנחש.",
+        "יאבד לגמרי. יוצא מן הכלל: שטר מטען עם משקל/נפח שכתוב בו במפורש '0' (ראו "
+        "הוראות שדה תפקיד_התעודה_בזוג) - שם '0' אינו כמות אמיתית אלא סימן שהשקילה "
+        "טרם בוצעה, וכן יש לחלץ מספר מתוך תיאור טקסטואלי חלופי אם קיים (למשל "
+        "'פינוי מכולה 12 מ\"ק') אל שדה זה ואל שדה יחידת_מידה, בדיוק כאילו הופיע "
+        "בטבלת השקילה עצמה. אם אין שום אינדיקציה לכמות - השאר ריק ואל תנחש.",
         "string",
     ),
     (
@@ -206,8 +224,15 @@ FIELD_DEFS = [
         "- זו בדיקה נפרדת שנעשית בקוד, לא משהו שעליך לאמת בעצמך. כלומר: אם "
         "התעודה הזו לבדה מציגה את המבנה המובהק (למשל שדות ברוטו/טרה/נטו "
         f"ומספר תעודה) - סמן '{CERT_ROLE_WEIGHING}', גם אם אינך יודע אם יש "
-        "עמוד מקושר. אם אין לתעודה מבנה מובהק כזה (המקרה הנפוץ ביותר) - השאר "
-        "ריק.",
+        "עמוד מקושר. "
+        f"ערך שלישי, בלתי קשור לזוג הזה: '{CERT_ROLE_BILL_OF_LADING_ZERO}' - "
+        "'שטר מטען' (כפי שמופיע למשל במערכות כמו טיקטראק) שמלווה משלוח לפני "
+        "שקילה בפועל, ולכן שדה המשקל/הנפח שלו בטבלה מכיל במפורש '0' (למשל "
+        "'0 טון') ולא ריק - זה לא אומר שהכמות באמת אפס. סמנו ערך זה כשמזוהה "
+        "תבנית כזו, כדי שהכמות תיבדק כהערכה טקסטואלית חלופית ולא כ-0 (ראו "
+        "הוראות שדה כמות). "
+        "אם אין לתעודה מבנה מובהק של אף אחד משלושת הדפוסים (המקרה הנפוץ ביותר) - "
+        "השאר ריק.",
         "string",
     ),
     (

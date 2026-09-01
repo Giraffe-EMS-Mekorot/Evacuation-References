@@ -30,6 +30,7 @@ from . import config
 from .derive import derive_year_month
 from .excel_writer import parse_quantity
 from .fields import (
+    CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_COMPLETION,
     CERT_ROLE_WEIGHING,
     CONFIDENCE_LEVELS,
@@ -136,6 +137,16 @@ _SYSTEM_PROMPT = (
     "ובלי קשר לשאלה אם יש עמוד סמוך מתאים (זו בדיקה נפרדת שנעשית בקוד): גם אם "
     "אינך יודע אם קיים עמוד מקושר, אם התעודה הזו לבדה מציגה מבנה מובהק של אחד "
     "משני הסוגים - סמן אותו. ברוב התעודות אין מבנה כזה כלל - אז השאר ריק. "
+    "תבנית שלישית, בלתי קשורה לזוג הזה: 'שטר מטען' (למשל ממערכות כמו טיקטראק) "
+    "שמלווה משלוח *לפני* שקילה בפועל - שדה המשקל/הנפח שלו בטבלה מכיל במפורש "
+    f"'0' (למשל '0 טון'), כי השקילה טרם בוצעה - לא כי הכמות באמת אפס. אם מזוהה "
+    f"מסמך כזה - סמנו בשדה cert_role את הערך '{CERT_ROLE_BILL_OF_LADING_ZERO}', "
+    "ואל תמלאו בשדה הכמות את ה-'0' מהטבלה. במקום זאת חפשו בשאר התעודה (למשל "
+    "בשדה 'פרטים' או תיאור חופשי) הערכה טקסטואלית של הכמות - אם מופיע בה מספר "
+    "עם יחידת מידה ברורה (למשל 'פינוי מכולה 12 מ\"ק') - חלצו את המספר לשדה "
+    "הכמות ואת יחידת המידה לשדה יחידת_מידה, בדיוק כפי שהייתם עושים אילו המספר "
+    "הזה הופיע בטבלת השקילה עצמה. אם אין בתעודה שום הערכה טקסטואלית עם מספר - "
+    "השאירו את שדה הכמות ריק (אל תמלאו 0). "
     "בשדה רמת_ביטחון דווח את הערכתך לגבי איכות הקריאה של התעודה כולה. "
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
@@ -374,6 +385,32 @@ def _flag_gross_tare_mismatch(record: dict) -> None:
     record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
+def _flag_bill_of_lading_estimate(record: dict) -> None:
+    """Ensures a record the model tagged CERT_ROLE_BILL_OF_LADING_ZERO (a
+    pre-weighing שטר מטען whose own weight/volume field is an explicit '0' -
+    see fields.py's cert_role description and the system prompt) always
+    surfaces for manual review, even if every field on the document itself
+    was read perfectly clearly - its quantity (if any) is, at best, a
+    textual estimate extracted from free text, never an actual weighing.
+
+    Escalates to "בינונית" like _flag_unclassified_waste_type's pattern
+    (the model correctly followed instructions here; this isn't an error),
+    never downgrading a row already at "נמוכה"/"בינונית" for another reason.
+    May be superseded later at the batch level, across every file in this
+    run - not just this one PDF's pages - if a real weighing record for the
+    same vehicle/site/date turns up: see
+    pipeline._cross_check_bill_of_lading_estimates, which then overwrites
+    this record's quantity/unit and adds its own note on top of this one.
+    """
+    if record.get("cert_role") != CERT_ROLE_BILL_OF_LADING_ZERO:
+        return
+    if record["confidence"] not in ("נמוכה", "בינונית"):
+        record["confidence"] = "בינונית"
+    note = "הערכה משטר מטען - טרם נשקל בפועל"
+    if note not in (record.get("notes") or ""):
+        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+
+
 def _append_container_note(record: dict) -> None:
     """Folds container_count/container_type into notes instead of leaving
     them as their own column - per spec, this pair of fields is meant to be
@@ -544,6 +581,7 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
             record.get("certificate_number") or record.get("reference_number") or ""
         )
         _flag_gross_tare_mismatch(record)
+        _flag_bill_of_lading_estimate(record)
         _flag_possibly_reversed_text(record)
         _append_container_note(record)
         _enforce_core_field_confidence(record)

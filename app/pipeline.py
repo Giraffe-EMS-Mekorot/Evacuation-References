@@ -10,11 +10,101 @@ from typing import Callable, List, NamedTuple, Optional
 import anthropic
 
 from . import config
+from .derive import parse_date
 from .excel_writer import parse_quantity, read_existing_records
 from .extractor import extract_certificate_pages
-from .fields import DOCUMENT_TYPE_OTHER, empty_record
+from .fields import CERT_ROLE_BILL_OF_LADING_ZERO, DOCUMENT_TYPE_OTHER, empty_record
 from .normalize import NameNormalizer
 from .quantity_check import build_quantity_history, flag_quantity_outlier
+
+# Date proximity (in days) for _cross_check_bill_of_lading_estimates - same
+# rounding-margin reasoning as extractor.py's own tolerances, sized a bit
+# more generously here since it's bridging two independently-issued
+# documents (a carrier's שטר מטען vs. the receiving site's own weighing
+# slip) rather than two adjacent pages of the same PDF.
+_ESTIMATE_DATE_PROXIMITY_DAYS = 3
+
+
+def _is_real_weighing_candidate(record: dict) -> bool:
+    """True if `record` looks like an actual completed weighing - real,
+    positive gross/tare, or at least a positive net quantity - rather than a
+    pre-weighing שטר מטען estimate (see _cross_check_bill_of_lading_estimates).
+
+    Deliberately NOT restricted to cert_role == CERT_ROLE_WEIGHING: that tag
+    only fires for the specific two-adjacent-page (weighing/completion)
+    pattern from the 2026-08-30 feature (see
+    extractor._detect_and_cross_check_pairs) - an ordinary single-document
+    weighing slip with no paired completion approval never gets that tag at
+    all, but is exactly as valid a "real weighing happened" source here.
+    """
+    if record.get("cert_role") == CERT_ROLE_BILL_OF_LADING_ZERO:
+        return False
+    gross = parse_quantity(record.get("gross_weight"))
+    tare = parse_quantity(record.get("tare_weight"))
+    if gross is not None and tare is not None and gross > 0 and tare > 0:
+        return True
+    qty = parse_quantity(record.get("quantity"))
+    return qty is not None and qty > 0
+
+
+def _cross_check_bill_of_lading_estimates(records: List[dict]) -> None:
+    """Looks, across the WHOLE batch just processed (every file in this
+    process_files() call, not just one PDF's adjacent pages - contrast with
+    extractor._detect_and_cross_check_pairs, which is strictly same-PDF/
+    adjacent-page) for a real weighing record that matches a שטר מטען
+    estimate record (see fields.CERT_ROLE_BILL_OF_LADING_ZERO and
+    extractor._flag_bill_of_lading_estimate) on vehicle number + site + a
+    nearby date.
+
+    Deliberately does NOT require a matching certificate/reference number -
+    per the spec this implements, the real-world case is exactly two
+    documents from two different systems (e.g. a carrier's own שטר מטען vs.
+    the receiving site's own weighing slip) that may each assign their own,
+    unrelated id to the same physical shipment; requiring id equality here
+    (like extractor._cross_check_document_pair does for the WEIGHING/
+    COMPLETION pattern) would simply never match in that case.
+
+    On a match, overwrites the ESTIMATE record's quantity/unit with the real
+    weighing record's - per spec, "העדף את נתוני השקילה האמיתית על
+    ההערכה" - and appends a note documenting the substitution on top of
+    _flag_bill_of_lading_estimate's own note (never replacing it - both
+    describe real, distinct facts about this row's history). The real
+    weighing record itself is left untouched. No match leaves the estimate
+    exactly as it already was - not a failure, just nothing to cross-check
+    against yet (e.g. the real weighing certificate hasn't been uploaded in
+    this batch at all).
+    """
+    estimates = [r for r in records if r.get("cert_role") == CERT_ROLE_BILL_OF_LADING_ZERO]
+    if not estimates:
+        return
+    candidates = [r for r in records if _is_real_weighing_candidate(r)]
+    if not candidates:
+        return
+
+    for estimate in estimates:
+        est_vehicle = (estimate.get("vehicle_number") or "").strip().casefold()
+        est_site = (estimate.get("site") or "").strip().casefold()
+        est_date = parse_date(estimate.get("date"))
+        if not est_vehicle or not est_site or not est_date:
+            continue  # not enough identifying information to safely match
+        for candidate in candidates:
+            if candidate is estimate:
+                continue
+            cand_vehicle = (candidate.get("vehicle_number") or "").strip().casefold()
+            cand_site = (candidate.get("site") or "").strip().casefold()
+            cand_date = parse_date(candidate.get("date"))
+            if cand_vehicle != est_vehicle or cand_site != est_site or not cand_date:
+                continue
+            if abs((est_date - cand_date).days) > _ESTIMATE_DATE_PROXIMITY_DAYS:
+                continue
+
+            estimate["quantity"] = candidate.get("quantity")
+            estimate["unit"] = candidate.get("unit")
+            estimate["confidence"] = candidate.get("confidence") or estimate["confidence"]
+            note = "כמות עודכנה מתעודת שקילה אמיתית שהוצלבה (תאריך+רכב+אתר)"
+            if note not in (estimate.get("notes") or ""):
+                estimate["notes"] = f"{estimate['notes']} | {note}" if estimate.get("notes") else note
+            break
 
 # Called as on_progress(index, total, path) right before each file is sent to
 # the model - lets a caller (CLI print, Streamlit status widget) show progress
@@ -67,6 +157,13 @@ def process_files(
     already in output/ריכוז_תעודות.xlsx (see app/normalize.py and
     app/quantity_check.py). This applies uniformly to both the CLI and the
     Streamlit UI, since both call this function.
+
+    Finally, once every file's records are collected, runs
+    _cross_check_bill_of_lading_estimates() once over the whole batch - a
+    שטר מטען page whose weight/volume was an explicit "0" (see
+    fields.CERT_ROLE_BILL_OF_LADING_ZERO) gets its estimated quantity
+    replaced with a real weighing record's, if one matching by vehicle+site+
+    nearby date turns up anywhere else in this same batch.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
@@ -117,4 +214,5 @@ def process_files(
                 note = f"שגיאה בבדיקת נרמול/כמות: {exc}"
                 record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
             records.append(record)
+    _cross_check_bill_of_lading_estimates(records)
     return ProcessResult(records=records, skipped=skipped)

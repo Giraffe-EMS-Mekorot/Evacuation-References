@@ -28,6 +28,8 @@ import pandas as pd
 import streamlit as st
 
 from app import config
+from app.duplicate_check import flag_potential_duplicates
+from app.excel_input import read_manual_excel
 from app.excel_writer import parse_quantity, read_existing_records, sort_by_confidence, write_records
 from app.fields import (
     CONFIDENCE_LEVELS,
@@ -38,6 +40,14 @@ from app.fields import (
     WASTE_TYPES,
 )
 from app.pipeline import process_files
+
+# Manually-filled tracking sheets, read directly (no vision call) - see
+# app/excel_input.py. A DIFFERENT feature from config.SUPPORTED_EXTENSIONS,
+# which is main.py's CLI file-type filter for input/ and deliberately left
+# untouched: the CLI has no code path for this at all, only this file's
+# upload area does (see the process_clicked handling below, which branches
+# by extension instead of sending a .xlsx through extract_certificate_pages).
+_MANUAL_EXCEL_EXTENSIONS = {".xlsx"}
 
 _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
 # Matches the row-fill colors excel_writer.py uses for these same confidence
@@ -272,12 +282,13 @@ with st.container(key="upload_card"):
         )
         project_name_input = st.session_state.active_project_name
 
-    allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS)
+    allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS | _MANUAL_EXCEL_EXTENSIONS)
     uploaded_files = st.file_uploader(
-        "גררו לכאן קובצי תעודות, או לחצו לבחירה",
+        "גררו לכאן קובצי תעודות, או לחצו לבחירה (כולל קובצי Excel ממולאים ידנית)",
         type=allowed_types,
         accept_multiple_files=True,
-        help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}",
+        help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}. קובץ xlsx נקרא ישירות "
+        "כגיליון ממולא ידנית, ולא נשלח למודל.",
         # Suffix bumped by "התחל פרויקט חדש" below - Streamlit treats a widget
         # with a new key as a brand-new, empty instance, which is the standard
         # way to force-clear a file_uploader's selection programmatically.
@@ -292,7 +303,13 @@ with st.container(key="upload_card"):
     )
 
 if process_clicked:
-    if not config.ANTHROPIC_API_KEY:
+    # .xlsx uploads never touch the model at all (see app/excel_input.py) -
+    # split them out first so an API-key check below only blocks the batch
+    # when it actually needs Claude for something.
+    manual_uploads = [f for f in uploaded_files if Path(f.name).suffix.lower() in _MANUAL_EXCEL_EXTENSIONS]
+    vision_uploads = [f for f in uploaded_files if Path(f.name).suffix.lower() not in _MANUAL_EXCEL_EXTENSIONS]
+
+    if vision_uploads and not config.ANTHROPIC_API_KEY:
         st.error(
             "ANTHROPIC_API_KEY חסר - ודאו שקובץ .env בתיקיית הפרויקט מכיל אותו, "
             "ואז הפעילו את השרת מחדש.",
@@ -314,42 +331,61 @@ if process_clicked:
         def on_error(path, exc):
             errors.append((path.name, str(exc)))
 
-        with st.status(f"מעבד {len(uploaded_files)} תעודות...", expanded=True) as status:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tmp_paths = []
-                for uploaded in uploaded_files:
-                    tmp_path = Path(tmp_dir) / uploaded.name
-                    tmp_path.write_bytes(uploaded.getvalue())
-                    tmp_paths.append(tmp_path)
+        new_records, new_skipped, manual_records = [], [], []
 
-                def on_progress(index, total, path):
-                    status.update(label=f"מעבד ({index}/{total}): {path.name}")
+        with st.status(f"מעבד {len(uploaded_files)} קבצים...", expanded=True) as status:
+            if vision_uploads:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_paths = []
+                    for uploaded in vision_uploads:
+                        tmp_path = Path(tmp_dir) / uploaded.name
+                        tmp_path.write_bytes(uploaded.getvalue())
+                        tmp_paths.append(tmp_path)
 
-                new_records, new_skipped = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
+                    def on_progress(index, total, path):
+                        status.update(label=f"מעבד ({index}/{total}): {path.name}")
 
-            # process_files() always returns "quantity" as a raw string (like
-            # every other extracted field); the numeric column downstream
-            # (the editable table, the Excel cell) needs a clean float-or-""
-            # invariant instead. Parse it the same way write_records() will
-            # anyway, so the type is consistent from here on.
-            for record in new_records:
-                raw_qty = record.get("quantity", "")
-                parsed_qty = parse_quantity(raw_qty)
-                if parsed_qty is not None:
-                    record["quantity"] = parsed_qty
-                elif raw_qty:
-                    # The model is instructed to return quantity as digits
-                    # only (or blank) - a non-empty value that still doesn't
-                    # parse means it ignored that instruction. Don't just
-                    # blank it silently: note what it actually said, then
-                    # blank it, so nothing is lost.
-                    note = f"כמות לא תקינה: {raw_qty}"
-                    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
-                    record["quantity"] = ""
-                else:
-                    record["quantity"] = ""
+                    new_records, new_skipped = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
 
-            st.session_state.records.extend(new_records)
+                # process_files() always returns "quantity" as a raw string
+                # (like every other extracted field); the numeric column
+                # downstream (the editable table, the Excel cell) needs a
+                # clean float-or-"" invariant instead. Parse it the same way
+                # write_records() will anyway, so the type is consistent
+                # from here on. Manual-Excel records (below) deliberately
+                # skip this - see app/excel_input.py's docstring on why an
+                # unparseable value there must stay verbatim, not be blanked.
+                for record in new_records:
+                    raw_qty = record.get("quantity", "")
+                    parsed_qty = parse_quantity(raw_qty)
+                    if parsed_qty is not None:
+                        record["quantity"] = parsed_qty
+                    elif raw_qty:
+                        # The model is instructed to return quantity as
+                        # digits only (or blank) - a non-empty value that
+                        # still doesn't parse means it ignored that
+                        # instruction. Don't just blank it silently: note
+                        # what it actually said, then blank it, so nothing
+                        # is lost.
+                        note = f"כמות לא תקינה: {raw_qty}"
+                        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+                        record["quantity"] = ""
+                    else:
+                        record["quantity"] = ""
+
+            if manual_uploads:
+                status.update(label=f"קורא {len(manual_uploads)} קובצי Excel ידניים...")
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    for uploaded in manual_uploads:
+                        tmp_path = Path(tmp_dir) / uploaded.name
+                        tmp_path.write_bytes(uploaded.getvalue())
+                        try:
+                            manual_records.extend(read_manual_excel(tmp_path))
+                        except Exception as exc:
+                            on_error(tmp_path, exc)
+
+            all_new_records = new_records + manual_records
+            st.session_state.records.extend(all_new_records)
             st.session_state.skipped.extend(new_skipped)
             # Keep the in-memory order matching what write_records() below is
             # about to produce on disk (נמוכה first) - otherwise downloading
@@ -361,13 +397,19 @@ if process_clicked:
             # comment near the top of this file. Never write records alone;
             # that would overwrite this project's file with only this
             # session's own batch and silently drop whatever was already in it.
-            write_records(
-                st.session_state.baseline_records + st.session_state.records,
-                st.session_state.output_path,
-            )
+            combined_records = st.session_state.baseline_records + st.session_state.records
+            # Manual-Excel rows vs. AI-extracted rows for the same physical
+            # shipment (e.g. logged by hand today, the scanned certificate
+            # uploaded next week) - flag for review, never auto-merge. See
+            # app/duplicate_check.py; safe to call on every write, including
+            # ones with no new manual/extracted rows at all (a no-op then).
+            flag_potential_duplicates(combined_records)
+            write_records(combined_records, st.session_state.output_path)
             skip_note = f", {len(new_skipped)} דולגו כלא-תעודות" if new_skipped else ""
+            manual_note = f", {len(manual_records)} מקובץ Excel ידני" if manual_records else ""
             status.update(
-                label=f"הושלם - עובדו {len(new_records)} תעודות חדשות{skip_note}", state="complete"
+                label=f"הושלם - עובדו {len(all_new_records)} תעודות חדשות{skip_note}{manual_note}",
+                state="complete",
             )
             st.session_state.just_completed = True
 
@@ -486,6 +528,17 @@ else:
             extra = sorted({v for v in current_values if v and v not in closed_list})
             return [""] + list(closed_list) + extra
 
+        def _display_quantity(value):
+            # "כמות (נטו)" is rendered as free text, not st.column_config's
+            # NumberColumn - deliberately: a manual-Excel row's quantity can
+            # be a non-numeric human annotation like "כ-1.8" (see
+            # app/excel_input.py's docstring), and NumberColumn would either
+            # reject or silently blank that. A plain float still gets the
+            # same fixed 2-decimal look NumberColumn's format="%,.2f" gave
+            # it before; anything else (a raw string, or "") passes through
+            # untouched.
+            return f"{value:,.2f}" if isinstance(value, (int, float)) else (value or "")
+
         # __idx__ carries each row's position in st.session_state.records
         # through the editor and back - hidden from view via column_config
         # below, but still round-trips in the returned data (per
@@ -495,14 +548,13 @@ else:
         # Streamlit version adds interactive sorting to st.data_editor.
         rows = [
             {
-                **{k: r.get(k, "") for k in keys},
+                **{k: (_display_quantity(r.get(k)) if k == "quantity" else r.get(k, "")) for k in keys},
                 _STATUS_KEY: _STATUS_SYMBOLS.get(r.get("confidence"), ""),
                 "__idx__": i,
             }
             for i, r in zip(filtered_indices, visible_records)
         ]
         df = pd.DataFrame(rows, columns=display_keys + ["__idx__"])
-        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
         df = df.rename(columns=header_by_key)
 
         def _highlight_source_cell(row):
@@ -538,7 +590,7 @@ else:
                 "__idx__": None,
                 "מצב": st.column_config.TextColumn(disabled=True, width="small"),
                 "קובץ מקור": st.column_config.TextColumn(disabled=True),
-                "כמות (נטו)": st.column_config.NumberColumn(format="%,.2f"),
+                "כמות (נטו)": st.column_config.TextColumn(),
                 "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
                 "סוג הפסולת": st.column_config.SelectboxColumn(
                     options=_selectbox_options(
@@ -561,7 +613,17 @@ else:
         for key in keys:
             value = edited_row.get(header_by_key[key])
             if key == "quantity":
-                target[key] = "" if pd.isna(value) else float(value)
+                # "כמות (נטו)" is a free-text column now (see the
+                # TextColumn/_display_quantity note above it), specifically
+                # so a manual-Excel row's non-numeric quantity (e.g.
+                # "כ-1.8") survives being displayed and re-edited without
+                # being coerced to a number or blanked. parse_quantity()
+                # reuses the exact same numeric-or-raw-string fallback
+                # excel_writer.write_records() applies at write time, so a
+                # normal numeric edit still round-trips as a float.
+                text_value = "" if value is None else str(value).strip()
+                parsed = parse_quantity(text_value) if text_value else None
+                target[key] = parsed if parsed is not None else text_value
             else:
                 target[key] = "" if value is None else value
 
@@ -569,6 +631,11 @@ else:
     # baseline_records + records, same as after processing above - an edit
     # here must not overwrite the project's file with only what's on screen.
     all_records = st.session_state.baseline_records + st.session_state.records
+    # Same duplicate check as after processing above - an edit here (e.g.
+    # correcting a site/date/quantity by hand) can newly create or resolve
+    # an apparent match, so it must be re-evaluated on every write, not just
+    # right after a batch is processed.
+    flag_potential_duplicates(all_records)
     write_records(all_records, st.session_state.output_path)
 
     with summary_slot:
