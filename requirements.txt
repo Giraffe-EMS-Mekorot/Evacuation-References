@@ -6,3 +6,9 @@ pandas>=2.0
 pypdfium2>=4.0
 Pillow>=10.0
 rapidfuzz>=3.0
+# Image preprocessing (deskew/contrast/denoise/sharpen - app/image_preprocessing.py,
+# 2026-09). Headless variant deliberately - this deploys to Streamlit
+# Community Cloud (a headless Linux container); the GUI-dependent
+# opencv-python package can fail to import there over missing system libs.
+opencv-python-headless>=4.9
+numpy>=1.26

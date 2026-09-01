@@ -24,7 +24,7 @@ import anthropic
 import pypdfium2 as pdfium
 from PIL import Image
 
-from . import config, examples_library
+from . import config, examples_library, image_preprocessing
 from .derive import derive_year_month
 from .excel_writer import parse_quantity
 from .image_utils import MAX_IMAGE_BYTES, PDF_RENDER_SCALE, downscale_and_encode, encode_image_block
@@ -218,6 +218,23 @@ def _enforce_core_field_confidence(record: dict) -> None:
 
 def _append_page_note(record: dict, page_index: int, page_total: int) -> None:
     note = f"עמוד {page_index} מתוך {page_total}"
+    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+
+
+def _flag_preprocessing(record: dict, preprocessing_notes: List[str]) -> None:
+    """Notes when image_preprocessing.preprocess_image() applied a
+    significant correction (deskew/contrast/denoise/sharpen - see that
+    module's own "apply" vs. "note" two-tier thresholds for what counts as
+    "significant" enough to reach here at all) to this page before it was
+    sent to the model - per the spec, so a reviewer knows the original scan
+    was flagged as problematic even though the image itself isn't visible
+    in the spreadsheet. Applied uniformly, before the document_type branch
+    in _extract_page - even a DOCUMENT_TYPE_OTHER page went through the same
+    image pipeline and is worth the same transparency.
+    """
+    if not preprocessing_notes:
+        return
+    note = f"בוצע עיבוד מקדים לשיפור איכות סריקה ({', '.join(preprocessing_notes)})"
     record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
@@ -479,7 +496,23 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic, use_examples:
     ordinary processing unless someone explicitly opts in with
     use_examples=True. False sends the exact same single-message request
     this pipeline always sent before this feature existed.
+
+    Before any of that, runs image_preprocessing.preprocess_image() on
+    `image` - conditional deskew/denoise/contrast/sharpening (see that
+    module) - always on, unlike use_examples above: unconditional
+    correction (never firing on an already-good scan) is the whole design
+    of that feature, so there's no equivalent "cost" concern gating it off
+    by default the way there is for few-shot examples.
     """
+    try:
+        image, preprocessing_notes = image_preprocessing.preprocess_image(image)
+    except Exception:
+        # Must never be why a whole certificate fails to extract - see
+        # image_preprocessing.preprocess_image's own docstring for why each
+        # individual correction step already fails safe; this is one more
+        # layer for a failure in the orchestration itself.
+        preprocessing_notes = []
+
     jpeg_bytes = downscale_and_encode(image)
     if len(jpeg_bytes) > MAX_IMAGE_BYTES:
         raise ValueError(
@@ -512,6 +545,7 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic, use_examples:
         raise RuntimeError("המודל לא החזיר קריאת כלי (tool_use)")
 
     record = {name: str(tool_use.input.get(name, "") or "").strip() for name, *_ in FIELD_DEFS}
+    _flag_preprocessing(record, preprocessing_notes)
     if record.get("document_type") == DOCUMENT_TYPE_OTHER:
         # Not a waste certificate at all (see FIELD_DEFS's document_type) -
         # none of the certificate-specific checks below make sense against a
