@@ -36,5 +36,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_FILENAME = "ריכוז_תעודות.xlsx"
+# Few-shot example library (2026-09) - see app/examples_library.py and
+# examples/README.md.
+EXAMPLES_DIR = BASE_DIR / "examples"
 
 SUPPORTED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}

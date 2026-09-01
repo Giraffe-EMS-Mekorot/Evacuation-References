@@ -99,6 +99,14 @@ REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
 CONFIDENCE_LEVELS = ["גבוהה", "בינונית", "נמוכה"]
 
+# The forced tool-use name extractor.py's real extraction calls use (see its
+# _build_tool_schema()) - kept here, not privately in extractor.py, so
+# app.examples_library can fabricate a matching assistant tool_use block for
+# a few-shot example without importing from extractor.py itself (which
+# imports FROM examples_library to prepend those messages - see that
+# module's docstring on why that would otherwise be a circular import).
+TOOL_NAME = "record_certificate_data"
+
 HEBREW_MONTHS = [
     "ינואר",
     "פברואר",

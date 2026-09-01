@@ -16,8 +16,6 @@ not just the multi-page case that motivated this. If that native-PDF fidelity
 turns out to matter in practice, the fix is special-casing single-page PDFs
 back to a `document` block, not re-litigating the multi-page split.
 """
-import base64
-import io
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
@@ -26,9 +24,10 @@ import anthropic
 import pypdfium2 as pdfium
 from PIL import Image
 
-from . import config
+from . import config, examples_library
 from .derive import derive_year_month
 from .excel_writer import parse_quantity
+from .image_utils import MAX_IMAGE_BYTES, PDF_RENDER_SCALE, downscale_and_encode, encode_image_block
 from .fields import (
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_COMPLETION,
@@ -38,6 +37,7 @@ from .fields import (
     FIELD_DEFS,
     HEBREW_MONTHS,
     REGIONS,
+    TOOL_NAME,
     UNCLASSIFIED_WASTE_TYPE,
     WASTE_TYPES,
     empty_record,
@@ -46,29 +46,6 @@ from .normalize import looks_reversed_hebrew
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
-_TOOL_NAME = "record_certificate_data"
-
-# Adaptive downscaling ladder: try the highest resolution first and only step
-# down as far as actually needed to clear _MAX_IMAGE_BYTES, instead of
-# shrinking every page to one fixed size regardless of how compressible it
-# is. 3000 is the top of the "2600-3000px" range from the spec - starting at
-# the ceiling, not the middle, actually maximizes resolution per-page as
-# intended; a smaller/plainer scan may well clear the limit on the first try
-# and keep its full 3000px, while a noisier one steps down only as needed.
-_ADAPTIVE_DIMENSIONS = [3000, 2600, 2200, 1800]
-_JPEG_QUALITY = 90
-# Render PDF pages at 300 DPI before downscaling - high enough that a
-# standard page (A4/Letter) actually renders past 3000px on its long side,
-# so the adaptive ladder above has real headroom to pick from; at the ~200
-# DPI this used to render at, a standard page tops out under 2400px and the
-# "try 3000 first" step would never have anything to bite on.
-_PDF_RENDER_SCALE = 300 / 72
-# Safety net for step 4 of the fix: matches Anthropic's documented per-image
-# limit. In practice a page that's stepped all the way down to 1800px at
-# quality 90 should never get close to this - this guards the case where it
-# somehow still does (e.g. a pathologically noisy scan) rather than sending
-# it and hoping.
-_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 # Below this year, a certificate's date is treated as an OCR/garbled-digit
 # misread rather than a real date - generous margin (10+ years) so it only
 # catches clearly-wrong values, not just old certificates.
@@ -102,7 +79,7 @@ _PAIR_QUANTITY_TOLERANCE = 1.0
 _SYSTEM_PROMPT = (
     "אתה עוזר שמחלץ מידע מובנה מתעודות פינוי פסולת (PDF או תמונה סרוקה/מצולמת, "
     "חלקן ממוחשבות וחלקן כתובות בכתב יד). קרא את התעודה המצורפת בעיון והפעל את הכלי "
-    f"{_TOOL_NAME} עם הנתונים שחילצת. "
+    f"{TOOL_NAME} עם הנתונים שחילצת. "
     "קבע קודם כל את סוג_המסמך (ראו הוראות השדה) - אם זה לא תעודת פינוי בפועל, אין "
     "טעם לחפש בו שדות של כמות/סוג פסולת, ומותר להשאיר אותם ריקים. "
     "אין פורמט קבוע אחד לתעודות האלה - ספקים שונים מנסחים ומסדרים שדות באופן שונה "
@@ -167,55 +144,12 @@ def _build_tool_schema() -> dict:
         properties[name] = {"type": json_type, "description": description}
         required.append(name)
     return {
-        "name": _TOOL_NAME,
+        "name": TOOL_NAME,
         "description": "רישום השדות המובנים שחולצו מתעודת פינוי פסולת אחת.",
         "input_schema": {
             "type": "object",
             "properties": properties,
             "required": required,
-        },
-    }
-
-
-def _downscale_and_encode(image: Image.Image) -> bytes:
-    """Encodes `image` as a JPEG, trying _ADAPTIVE_DIMENSIONS from highest to
-    lowest and stopping at the first one that clears _MAX_IMAGE_BYTES - keeps
-    each specific page at the best resolution *it* can afford, rather than
-    shrinking every page to the same fixed size up front regardless of how
-    compressible it actually turns out to be. Never upscales past the
-    image's own native size. If every step is still oversized, returns the
-    smallest (last) attempt anyway - the caller checks the size and turns
-    that into a clear per-page failure instead of sending it.
-    """
-    if image.mode not in ("RGB", "L"):
-        image = image.convert("RGB")
-    width, height = image.size
-    longest = max(width, height)
-
-    encoded = b""
-    for max_dimension in _ADAPTIVE_DIMENSIONS:
-        if longest > max_dimension:
-            ratio = max_dimension / longest
-            resized = image.resize(
-                (max(1, round(width * ratio)), max(1, round(height * ratio))), Image.LANCZOS
-            )
-        else:
-            resized = image
-        buffer = io.BytesIO()
-        resized.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
-        encoded = buffer.getvalue()
-        if len(encoded) <= _MAX_IMAGE_BYTES:
-            return encoded
-    return encoded
-
-
-def _encode_image_block(jpeg_bytes: bytes) -> dict:
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": base64.standard_b64encode(jpeg_bytes).decode("utf-8"),
         },
     }
 
@@ -525,34 +459,52 @@ def _detect_and_cross_check_pairs(records: List[dict]) -> None:
             _cross_check_document_pair(b, a)
 
 
-def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
+def _extract_page(image: Image.Image, client: anthropic.Anthropic, use_examples: bool = False) -> dict:
     """Sends one already-loaded page image to Claude and returns its
     extracted fields. The single-page core that both a plain image file and
     each page of a split PDF funnel through. Doesn't set source_file - the
     caller (extract_certificate_pages) does, since it knows the filename.
+
+    use_examples=True prepends a small few-shot preamble before the real
+    page's own message - 1-2 known-hard, known-correct example certificates
+    with their ground-truth answers, curated under examples/ (see
+    app.examples_library and examples/README.md) - to help the model read
+    difficult handwriting more like it read those. A missing or empty
+    example library degrades to zero examples, not an error (see
+    examples_library.build_fewshot_messages()).
+
+    **Default is False (2026-09 decision)**: this whole few-shot feature is
+    built and ready but deliberately inactive for now - not pursued further
+    per an explicit user decision - so it must add zero cost/latency to
+    ordinary processing unless someone explicitly opts in with
+    use_examples=True. False sends the exact same single-message request
+    this pipeline always sent before this feature existed.
     """
-    jpeg_bytes = _downscale_and_encode(image)
-    if len(jpeg_bytes) > _MAX_IMAGE_BYTES:
+    jpeg_bytes = downscale_and_encode(image)
+    if len(jpeg_bytes) > MAX_IMAGE_BYTES:
         raise ValueError(
             f"התמונה גדולה מדי לשליחה גם אחרי דחיסה ({len(jpeg_bytes) / 1_000_000:.1f}MB)"
         )
-    file_block = _encode_image_block(jpeg_bytes)
+    file_block = encode_image_block(jpeg_bytes)
+
+    messages = list(examples_library.build_fewshot_messages()) if use_examples else []
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                file_block,
+                {"type": "text", "text": "חלץ את הנתונים מהתעודה המצורפת."},
+            ],
+        }
+    )
 
     response = client.messages.create(
         model=config.MODEL_NAME,
         max_tokens=1024,
         system=_SYSTEM_PROMPT,
         tools=[_build_tool_schema()],
-        tool_choice={"type": "tool", "name": _TOOL_NAME},
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    file_block,
-                    {"type": "text", "text": "חלץ את הנתונים מהתעודה המצורפת."},
-                ],
-            }
-        ],
+        tool_choice={"type": "tool", "name": TOOL_NAME},
+        messages=messages,
     )
 
     tool_use = next((block for block in response.content if block.type == "tool_use"), None)
@@ -593,7 +545,9 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic) -> dict:
     return record
 
 
-def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] = None) -> List[dict]:
+def extract_certificate_pages(
+    path: Path, client: Optional[anthropic.Anthropic] = None, use_examples: bool = False
+) -> List[dict]:
     """Extracts one record per page of `path` - a plain image file is one
     page; a PDF is split into one page per record. A single bad page (the
     model call fails, or the page is somehow still too large after
@@ -605,6 +559,9 @@ def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] 
     extension, corrupt PDF/image) - that's a whole-file failure with no page
     count to report against, left for the caller (app.pipeline.process_files)
     to catch exactly like before this per-page split existed.
+
+    use_examples (default False - see _extract_page()'s own docstring) is
+    passed straight through to it for every page.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     ext = path.suffix.lower()
@@ -617,8 +574,8 @@ def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] 
             for index in range(total):
                 page = pdf[index]
                 try:
-                    image = page.render(scale=_PDF_RENDER_SCALE).to_pil()
-                    record = _extract_page(image, client=client)
+                    image = page.render(scale=PDF_RENDER_SCALE).to_pil()
+                    record = _extract_page(image, client=client, use_examples=use_examples)
                 except Exception as exc:  # one bad page shouldn't drop the rest of the file
                     record = empty_record(error=str(exc))
                 finally:
@@ -643,7 +600,7 @@ def extract_certificate_pages(path: Path, client: Optional[anthropic.Anthropic] 
     if ext in _IMAGE_EXTENSIONS:
         image = Image.open(path)
         try:
-            record = _extract_page(image, client=client)
+            record = _extract_page(image, client=client, use_examples=use_examples)
         except Exception as exc:
             record = empty_record(error=str(exc))
         record["source_file"] = path.name

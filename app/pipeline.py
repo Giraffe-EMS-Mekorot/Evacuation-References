@@ -138,6 +138,7 @@ def process_files(
     client: Optional[anthropic.Anthropic] = None,
     on_progress: Optional[ProgressCallback] = None,
     on_error: Optional[ErrorCallback] = None,
+    use_examples: bool = False,
 ) -> ProcessResult:
     """Extracts one or more records per file, in order (one per page for a
     PDF, one for a plain image). A file that can't even be opened/split at
@@ -164,6 +165,12 @@ def process_files(
     fields.CERT_ROLE_BILL_OF_LADING_ZERO) gets its estimated quantity
     replaced with a real weighing record's, if one matching by vehicle+site+
     nearby date turns up anywhere else in this same batch.
+
+    use_examples (default False - inactive/not pursued further per an
+    explicit 2026-09 user decision, kept ready but off so it adds zero
+    cost/latency unless someone opts in) is passed straight through to
+    extractor.extract_certificate_pages() for every file - see that
+    function's own docstring and app/examples_library.py.
     """
     client = client or anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
@@ -185,7 +192,7 @@ def process_files(
         if on_progress:
             on_progress(index, total, path)
         try:
-            page_records = extract_certificate_pages(path, client=client)
+            page_records = extract_certificate_pages(path, client=client, use_examples=use_examples)
         except Exception as exc:  # the whole file couldn't be opened/split at all
             if on_error:
                 on_error(path, exc)
