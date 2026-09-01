@@ -55,21 +55,39 @@ _FLAGGED_LEVELS = {"נמוכה", "בינונית"}
 # always agree visually.
 _ROW_COLORS = {"נמוכה": "#FFC7CE", "בינונית": "#FFEB9C"}
 _LOGO_PATH = Path(__file__).resolve().parent / "logo.jpg"
+
+# --- Design tokens (2026-09 bolder-palette pass) ----------------------------
+# Deep green, matching config.toml's primaryColor - kept as its own constant
+# (not read back from theme) since Python has no access to the active theme
+# at render time, same reasoning as the pre-existing _ACCENT_GREEN_LIGHT
+# below. Used directly wherever a literal color is needed in the CSS/HTML
+# blocks in this file (gradients, card backgrounds, icon badges).
+_ACCENT_GREEN_DARK = "#12291C"
+# A lighter step of the same green, for the header banner's gradient depth
+# and for text-on-gold contexts - not a theme token (config.toml has no
+# "secondary green" slot), recomputed here to stay in proportion to the
+# deeper _ACCENT_GREEN_DARK above (the old #3D6B4F was tuned against the
+# previous, lighter #1B4332 primary and would look too pale against this one).
+_ACCENT_GREEN_LIGHT = "#2F5940"
+# Cream - matches config.toml's backgroundColor; kept as its own constant
+# since it's used as an explicit foreground/fill color in several places
+# below (circular-logo backing, card text, watermark SVG), not just as the
+# page background config.toml already handles on its own.
+_CREAM = "#FAF7F0"
+_CREAM_URL = _CREAM.replace("#", "%23")  # '#' must be percent-escaped inside a data: URI
+# Bolder gold accent (2026-09 request) - matches config.toml's orangeColor,
+# used both there (so Streamlit's own orange-tinted elements pick it up) and
+# here directly for every other bit of custom CSS/HTML that needs the
+# literal value: the upload-area border, the stat-card/upload-badge accents,
+# the primary-button border, and the high-confidence accent border in the
+# results table (see _highlight_source_cell).
+_ACCENT_GOLD = "#D4A24C"
 # The upload area's accent border/background, per the design request - not
 # in .streamlit/config.toml because there's no theme token for "this one
 # specific widget's background"; see the CSS block below for why this
 # targets the card's own key rather than a fixed/generic selector.
-_UPLOAD_AREA_BORDER = "#A47E5B"
-_UPLOAD_AREA_BACKGROUND = "#F3EADC"
-# A lighter green than primaryColor, for the header's gradient depth - not a
-# theme token (config.toml has no "secondary green" slot), just a plain
-# constant used directly in the CSS block below.
-_ACCENT_GREEN_LIGHT = "#3D6B4F"
-# Matches config.toml's orangeColor - used both there (so Streamlit's own
-# orange-tinted elements pick it up) and here directly, for the one bit of
-# custom CSS that needs the literal value: the high-confidence accent border
-# in the results table (see _highlight_source_cell).
-_ACCENT_GOLD = "#C9982F"
+_UPLOAD_AREA_BORDER = _ACCENT_GOLD
+_UPLOAD_AREA_BACKGROUND = "#FBF1DE"
 # Symbols shown in the read-only "status" column next to רמת ביטחון, in
 # addition to (not instead of) that column's own text value and the existing
 # background-fill coloring - a second, non-color signal for the same
@@ -109,9 +127,10 @@ st.set_page_config(
 # Streamlit has no built-in RTL layout mode; the first rule below is the
 # minimal CSS needed to mirror the app right-to-left for Hebrew - a
 # functional requirement, not decorative styling. Everything else in this
-# block IS deliberately decorative (the "card" look, the header gradient),
-# targeted at specific containers' own st.container(key=...) values rather
-# than generic selectors that would repaint unrelated widgets:
+# block IS deliberately decorative (the "card" look, the header gradient,
+# the 2026-09 bolder-palette pass below), targeted at specific containers'
+# own st.container(key=...) values rather than generic selectors that would
+# repaint unrelated widgets:
 #
 #   header_card   - the logo+title+caption banner (both here and in the
 #                   password screen - the two never render in the same
@@ -119,6 +138,15 @@ st.set_page_config(
 #                   background needs the title/caption text forced light -
 #                   config.toml's :green[]/:gray[] markdown colors are for
 #                   the plain cream background elsewhere, not readable here.
+#   login_logo / main_logo - the same header_card's logo image, just two
+#                   different sizes (see _check_password() and the main
+#                   header section) - a shared img-styling rule (circular,
+#                   gold ring) keyed to both.
+#   login_header_title - wraps ONLY the login screen's st.title() call, so
+#                   the 32px override below never touches the main screen's
+#                   title (still the theme's default h1 size, per the
+#                   design request: main screen gets "the same title, just
+#                   the new background").
 #   upload_card / results_card / skipped_card - plain "card" containers:
 #                   distinct background, soft border, subtle shadow. Cheap
 #                   visual separation Streamlit's own border=True can't give
@@ -127,31 +155,218 @@ st.set_page_config(
 # upload_card additionally gets the gold dashed border from the earlier
 # design pass, now on the whole card instead of just the file_uploader
 # widget, since the card itself now visually *is* the upload area.
+#
+# .stat-card* / .upload-badge - custom-HTML replacements for st.metric() and
+# the file_uploader's own (icon-less, in this Streamlit version) dropzone -
+# see _render_stat_cards() and the upload_card block below for why plain
+# Streamlit widgets can't get a per-instance colored background + icon.
+# Their icon glyphs use "Material Symbols Rounded" - the exact font
+# Streamlit's own :material/...: icons already render with (confirmed in
+# its bundled, locally-served font file - no extra network request), so a
+# literal icon name like "cloud_upload" renders as the matching glyph and
+# stays visually consistent with every other icon in the app.
+#
+# [data-testid="stBaseButton-primary"] - Streamlit's own stable test-id for
+# every type="primary" button (confirmed against the installed version's
+# source), used here instead of a class name so this survives a Streamlit
+# upgrade's internal class-name churn better than most alternatives would.
 st.html(f"""<style>
 .stApp, .stApp * {{ direction: rtl; }}
 
 .st-key-header_card {{
-    background: linear-gradient(135deg, {"#1B4332"} 0%, {_ACCENT_GREEN_LIGHT} 100%);
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(135deg, {_ACCENT_GREEN_DARK} 0%, {_ACCENT_GREEN_LIGHT} 100%);
     border-radius: 16px;
     padding: 1.25rem 1.75rem;
     margin-bottom: 0.5rem;
 }}
 .st-key-header_card, .st-key-header_card * {{
-    color: #FAF7F0 !important;
+    color: {_CREAM} !important;
+}}
+/* Subtle leaf watermark - purely decorative texture, kept at very low
+   opacity and positioned away from the logo/title (physical left, which
+   under this page's RTL direction is the side opposite the branding) so it
+   never competes with real content for attention. z-index:-1 relies on
+   position:relative above to keep it confined behind this card's own
+   normal-flow content, not the page underneath it. */
+.st-key-header_card::before {{
+    content: "";
+    position: absolute;
+    left: -55px;
+    top: -65px;
+    width: 320px;
+    height: 320px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 2C18 20 4 52 50 98C96 52 82 20 50 2Z' fill='{_CREAM_URL}'/%3E%3Cpath d='M50 12V88' stroke='{_CREAM_URL}' stroke-width='1.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-size: contain;
+    opacity: 0.07;
+    z-index: -1;
+    pointer-events: none;
+}}
+
+/* Circular, gold-ringed logo badge - object-fit:contain (not cover) is
+   deliberate: logo.jpg is a wide wordmark, not a compact mark, so a tight
+   circular CROP would clip the lettering at both edges. Framing it inside a
+   slightly-larger circle instead keeps the whole logo intact. */
+.st-key-login_logo img, .st-key-main_logo img {{
+    border-radius: 50%;
+    border: 2.5px solid {_ACCENT_GOLD};
+    background: {_CREAM};
+    object-fit: contain;
+    box-sizing: border-box;
+}}
+.st-key-login_logo img {{ padding: 16px; }}
+.st-key-main_logo img {{ padding: 10px; }}
+
+/* Flex+gap (not relying on each child's own default margin, which
+   Streamlit sets per element and varies by element type) keeps the eyebrow
+   label, title, and underline tight against each other regardless of
+   Streamlit's own internal spacing for a heading vs. a raw st.html() block. */
+.st-key-login_header_title [data-testid="stVerticalBlock"] {{
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+}}
+.st-key-login_header_title [data-testid="stElementContainer"] {{
+    margin: 0 !important;
+}}
+.st-key-login_header_title h1 {{
+    font-size: 32px !important;
+    margin: 0 !important;
+}}
+/* More specific + also !important, so this beats the blanket
+   ".st-key-header_card *{{color:cream !important}}" rule above for just
+   these two decorative bits (the gold eyebrow label and underline). */
+.st-key-header_card .login-eyebrow {{
+    color: {_ACCENT_GOLD} !important;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    margin-bottom: 0.2rem;
+}}
+.st-key-header_card .login-underline {{
+    background: {_ACCENT_GOLD} !important;
+    width: 60px;
+    height: 3px;
+    margin-top: 0.1rem;
 }}
 
 .st-key-upload_card, .st-key-results_card, .st-key-skipped_card {{
     background-color: #FFFFFF;
     border-radius: 14px;
     padding: 1.25rem 1.5rem;
-    box-shadow: 0 2px 10px rgba(27, 67, 50, 0.08);
+    box-shadow: 0 2px 10px rgba(18, 41, 28, 0.10);
     margin-bottom: 1rem;
 }}
 .st-key-upload_card {{
     border: 2px dashed {_UPLOAD_AREA_BORDER};
     background-color: {_UPLOAD_AREA_BACKGROUND};
 }}
+.upload-badge {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: {_ACCENT_GREEN_DARK};
+    margin: 0 auto 0.75rem auto;
+}}
+.upload-badge span {{
+    font-family: "Material Symbols Rounded";
+    font-size: 30px;
+    color: {_ACCENT_GOLD};
+    line-height: 1;
+}}
+
+.stat-card-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.9rem;
+    width: 100%;
+}}
+.stat-card {{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+}}
+.stat-card__icon {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}}
+.stat-card__icon span {{
+    font-family: "Material Symbols Rounded";
+    font-size: 24px;
+    line-height: 1;
+}}
+.stat-card__value {{
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.15;
+}}
+.stat-card__label {{
+    font-size: 13px;
+    font-weight: 500;
+    opacity: 0.9;
+}}
+.stat-card--green {{
+    background: {_ACCENT_GREEN_DARK};
+    color: {_CREAM};
+}}
+.stat-card--green .stat-card__icon {{ background: rgba(250, 247, 240, 0.14); }}
+.stat-card--green .stat-card__icon span {{ color: {_ACCENT_GOLD}; }}
+.stat-card--gold {{
+    background: {_ACCENT_GOLD};
+    color: {_ACCENT_GREEN_DARK};
+}}
+.stat-card--gold .stat-card__icon {{ background: rgba(18, 41, 28, 0.12); }}
+.stat-card--gold .stat-card__icon span {{ color: {_ACCENT_GREEN_DARK}; }}
+
+[data-testid="stBaseButton-primary"] {{
+    border: 2px solid {_ACCENT_GOLD} !important;
+    border-radius: 10px !important;
+    color: {_CREAM} !important;
+}}
 </style>""")
+
+
+def _stat_card_html(value, label: str, icon: str, variant: str) -> str:
+    return f"""
+    <div class="stat-card stat-card--{variant}">
+        <div class="stat-card__icon"><span>{icon}</span></div>
+        <div>
+            <div class="stat-card__value">{value}</div>
+            <div class="stat-card__label">{label}</div>
+        </div>
+    </div>
+    """
+
+
+def _render_stat_cards(total: int, flagged: int) -> None:
+    """Renders the two summary numbers as a pair of custom, high-contrast
+    cards (deep green / bold gold) instead of st.metric() - a pure rendering
+    swap for the 2026-09 design pass, not a data change: both call sites
+    below compute `total`/`flagged` exactly as before (len(...) and the same
+    confidence-filtered sum()), this function only decides how to display
+    them. st.metric() has no per-instance background-color or icon support,
+    which the design explicitly calls for here, hence custom HTML via
+    st.html() instead.
+    """
+    st.html(f"""
+    <div class="stat-card-grid">
+        {_stat_card_html(total, 'סה"כ תעודות בפרויקט', "description", "green")}
+        {_stat_card_html(flagged, "מסומנות לבדיקה ידנית", "warning", "gold")}
+    </div>
+    """)
 
 
 def _check_password() -> bool:
@@ -178,8 +393,12 @@ def _check_password() -> bool:
     with center:
         with st.container(key="header_card"):
             if _LOGO_PATH.is_file():
-                st.image(str(_LOGO_PATH), width=100)
-            st.title(":material/lock: מערכת ריכוז תעודות פינוי", text_alignment="right")
+                with st.container(key="login_logo"):
+                    st.image(str(_LOGO_PATH), width=120)
+            with st.container(key="login_header_title"):
+                st.html('<div class="login-eyebrow">כניסה מאובטחת</div>')
+                st.title(":material/lock: מערכת ריכוז תעודות פינוי", text_alignment="right")
+                st.html('<div class="login-underline"></div>')
         with st.form("login_form", border=True):
             entered_password = st.text_input("סיסמה", type="password")
             submitted = st.form_submit_button(
@@ -251,7 +470,8 @@ with st.container(key="header_card"):
     logo_col, title_col = st.columns([1, 5], vertical_alignment="center")
     with logo_col:
         if _LOGO_PATH.is_file():
-            st.image(str(_LOGO_PATH), width=100)
+            with st.container(key="main_logo"):
+                st.image(str(_LOGO_PATH), width=80)
     with title_col:
         st.title(":material/recycling: מערכת ריכוז תעודות פינוי", text_alignment="right")
     st.caption("העלאת תעודות פינוי פסולת וחילוץ אוטומטי של הנתונים לקובץ Excel מרוכז אחד.")
@@ -282,6 +502,12 @@ with st.container(key="upload_card"):
         )
         project_name_input = st.session_state.active_project_name
 
+    # Purely decorative - this Streamlit version's file_uploader dropzone has
+    # no illustrative icon of its own (confirmed against the installed
+    # version's source), just text + a small "Browse files" button; this
+    # circle+icon badge is added independently, above the real widget, not a
+    # restyle of anything Streamlit itself renders.
+    st.html('<div class="upload-badge"><span>cloud_upload</span></div>')
     allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS | _MANUAL_EXCEL_EXTENSIONS)
     uploaded_files = st.file_uploader(
         "גררו לכאן קובצי תעודות, או לחצו לבחירה (כולל קובצי Excel ממולאים ידנית)",
@@ -460,9 +686,7 @@ if not st.session_state.records:
         icon=":material/info:",
     )
     with summary_slot:
-        with st.container(horizontal=True, horizontal_alignment="right"):
-            st.metric('סה"כ תעודות בפרויקט', 0)
-            st.metric("מסומנות לבדיקה ידנית", 0)
+        _render_stat_cards(0, 0)
 else:
     with st.container(key="results_card"):
         st.subheader(":material/checklist: תוצאות", text_alignment="right")
@@ -639,12 +863,10 @@ else:
     write_records(all_records, st.session_state.output_path)
 
     with summary_slot:
-        with st.container(horizontal=True, horizontal_alignment="right"):
-            st.metric('סה"כ תעודות בפרויקט', len(all_records))
-            st.metric(
-                "מסומנות לבדיקה ידנית",
-                sum(1 for r in all_records if r.get("confidence") in _FLAGGED_LEVELS),
-            )
+        _render_stat_cards(
+            len(all_records),
+            sum(1 for r in all_records if r.get("confidence") in _FLAGGED_LEVELS),
+        )
 
     st.download_button(
         "הורדת קובץ Excel",

@@ -20,7 +20,11 @@
 # [[theme.fontFaces]] instead, not a second `family=` here.
 [theme]
 base = "light"
-primaryColor = "#1B4332"
+# Deepened 2026-09 (was #1B4332) as part of a bolder-palette design pass -
+# see streamlit_app.py's _ACCENT_GREEN_DARK for the same value used directly
+# in custom CSS/HTML there, and _ACCENT_GREEN_LIGHT for a lighter step of it
+# recomputed to stay in proportion against this deeper base.
+primaryColor = "#12291C"
 backgroundColor = "#FAF7F0"
 secondaryBackgroundColor = "#F0EBE0"
 textColor = "#1A1A1A"
@@ -34,9 +38,11 @@ showWidgetBorder = true
 
 redColor = "#C0392B"
 yellowColor = "#B7860B"
-# Gold/amber accent pulled from the logo's ring color - used sparingly (see
-# streamlit_app.py's high-confidence accent), not as a primary UI color.
-orangeColor = "#C9982F"
+# Bolder gold accent (2026-09, was #C9982F) - see streamlit_app.py's
+# _ACCENT_GOLD for the same value used directly in custom CSS/HTML (upload
+# border, stat cards, upload badge, primary-button border, high-confidence
+# accent in the results table).
+orangeColor = "#D4A24C"
 # greenColor matches primaryColor, grayColor is repurposed as the gold-brown
 # accent (not an actual gray) - kept for any :green[]/:gray[] markdown text
 # elsewhere in the app to stay on-palette; the main title/caption no longer
