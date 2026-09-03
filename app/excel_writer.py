@@ -66,6 +66,13 @@ _LEGACY_HEADER_ALIASES = {
     "ספק/מוביל": "supplier_or_carrier",  # 2026-08-30 through the same day's later "אתר קולט" rename
     "שנה": _LEGACY_YEAR_KEY,  # pre-2026-08-30
     "חודש": _LEGACY_MONTH_KEY,  # pre-2026-08-30
+    # 2026-08-30 through 2026-09-03 (superseded by EXCEL_COLUMNS's current
+    # labels - see that list's own comment in fields.py):
+    "מרחב": "region",
+    "אתר/מקור": "site",
+    "תאריך": "date",
+    "כמות (נטו)": "quantity",
+    "מספר תעודה/אסמכתא": "certificate_or_reference",
 }
 
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
@@ -163,10 +170,11 @@ def write_records(records: List[dict], output_path: Path) -> None:
     any existing file.
 
     Column order/headers on the main sheet come from fields.EXCEL_COLUMNS
-    (as of 2026-09-01: מרחב | אתר/מקור | אתר קולט | תאריך | מספר תעודה/
-    אסמכתא | סוג הפסולת | כמות | יחידת מידה | הערות | קובץ מקור - רמת
-    ביטחון is deliberately not one of these any more, see that list's own
-    comment and _write_internal_tracking_sheet() below). Rows whose
+    (as of 2026-09-03: מרחב / יחידה ראשית | יחידה / אתר מקור | סוג הפסולת |
+    תאריך האיסוף | כמות מדווחת | יחידת מידה | מספר אסמכתא | מספר רכב |
+    שם הנהג | אתר קולט | הערות | קובץ מקור - רמת ביטחון is deliberately not
+    one of these, see that list's own comment and
+    _write_internal_tracking_sheet() below). Rows whose
     רמת_ביטחון is "נמוכה"/"בינונית" are still highlighted red/yellow so
     they're easy to find for manual review, even without their own text
     column spelling out why - that always wins over the plain banded-row

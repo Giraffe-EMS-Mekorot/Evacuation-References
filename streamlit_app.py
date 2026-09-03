@@ -698,18 +698,20 @@ else:
     with st.container(key="results_card"):
         st.subheader(":material/checklist: תוצאות", text_alignment="right")
 
-        # Off by default - vehicle/driver/entry-exit-time/gross-tare-weight
-        # are collected from every certificate (see extractor.py) but kept
-        # out of the main columns unless a reviewer specifically asks for
-        # them here. The same fields are always in the Excel file's own
-        # separate "מעקב פנימי" sheet regardless of this toggle - see
-        # excel_writer.py's _write_internal_tracking_sheet.
+        # Off by default - entry/exit-time and gross/tare-weight are
+        # collected from every certificate (see extractor.py) but kept out
+        # of the main columns unless a reviewer specifically asks for them
+        # here. The same fields are always in the Excel file's own separate
+        # "מעקב פנימי" sheet regardless of this toggle - see excel_writer.py's
+        # _write_internal_tracking_sheet. vehicle_number/driver_name used to
+        # be part of this toggle too, until 2026-09-03 when they were
+        # promoted to always-visible main columns (see fields.EXCEL_COLUMNS).
         show_internal_tracking = st.checkbox(
             "הצג פרטים נוספים (מעקב פנימי)",
-            help='מוסיף לטבלה עמודות שנאספות מהתעודה אך לא מוצגות כברירת מחדל: '
-            'מס\' רכב, שם נהג, שעות כניסה/יציאה, משקל ברוטו/טרה. עמודות אלה '
-            'תמיד נשמרות גם בגיליון "מעקב פנימי" הנפרד שבקובץ ה-Excel, גם '
-            "כשהתיבה הזו לא מסומנת.",
+            help="מוסיף לטבלה עמודות שנאספות מהתעודה אך לא מוצגות כברירת מחדל: "
+            "שעות כניסה/יציאה, משקל ברוטו/טרה. עמודות אלה תמיד נשמרות גם "
+            'בגיליון "מעקב פנימי" הנפרד שבקובץ ה-Excel, גם כשהתיבה הזו לא '
+            "מסומנת.",
         )
 
         header_by_key = dict(EXCEL_COLUMNS)
@@ -768,7 +770,7 @@ else:
             return [""] + list(closed_list) + extra
 
         def _display_quantity(value):
-            # "כמות (נטו)" is rendered as free text, not st.column_config's
+            # "כמות מדווחת" is rendered as free text, not st.column_config's
             # NumberColumn - deliberately: a manual-Excel row's quantity can
             # be a non-numeric human annotation like "כ-1.8" (see
             # app/excel_input.py's docstring), and NumberColumn would either
@@ -829,14 +831,14 @@ else:
                 "__idx__": None,
                 "מצב": st.column_config.TextColumn(disabled=True, width="small"),
                 "קובץ מקור": st.column_config.TextColumn(disabled=True),
-                "כמות (נטו)": st.column_config.TextColumn(),
+                "כמות מדווחת": st.column_config.TextColumn(),
                 "רמת ביטחון": st.column_config.SelectboxColumn(options=CONFIDENCE_LEVELS),
                 "סוג הפסולת": st.column_config.SelectboxColumn(
                     options=_selectbox_options(
                         WASTE_TYPES + [UNCLASSIFIED_WASTE_TYPE], (r.get("waste_type") for r in visible_records)
                     )
                 ),
-                "מרחב": st.column_config.SelectboxColumn(
+                "מרחב / יחידה ראשית": st.column_config.SelectboxColumn(
                     options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
                 ),
             },
@@ -852,7 +854,7 @@ else:
         for key in keys:
             value = edited_row.get(header_by_key[key])
             if key == "quantity":
-                # "כמות (נטו)" is a free-text column now (see the
+                # "כמות מדווחת" is a free-text column now (see the
                 # TextColumn/_display_quantity note above it), specifically
                 # so a manual-Excel row's non-numeric quantity (e.g.
                 # "כ-1.8") survives being displayed and re-edited without

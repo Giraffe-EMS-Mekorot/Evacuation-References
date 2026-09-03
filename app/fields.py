@@ -16,14 +16,16 @@ Three lists matter here, and each is edited independently:
 
   INTERNAL_TRACKING_FIELDS / INTERNAL_TRACKING_SHEET_COLUMNS - fields that
                   ARE extracted (they're in FIELD_DEFS) but are deliberately
-                  kept off the main sheet/table by default: vehicle/driver/
-                  entry-exit-time/gross-tare-weight. Still collected and
-                  saved, just surfaced behind the "הצג פרטים נוספים" toggle
-                  in streamlit_app.py and on Excel's second "מעקב פנימי"
-                  sheet (see excel_writer.py) rather than cluttering the
-                  main view every reviewer sees. INTERNAL_TRACKING_FIELDS is
-                  the plain 6-field set (used by the Streamlit toggle, which
-                  already shows the identifying columns in the main table);
+                  kept off the main sheet/table by default: entry/exit-time
+                  and gross/tare-weight (vehicle_number/driver_name moved
+                  onto the main sheet 2026-09-03 - see EXCEL_COLUMNS's own
+                  comment). Still collected and saved, just surfaced behind
+                  the "הצג פרטים נוספים" toggle in streamlit_app.py and on
+                  Excel's second "מעקב פנימי" sheet (see excel_writer.py)
+                  rather than cluttering the main view every reviewer sees.
+                  INTERNAL_TRACKING_FIELDS is the plain 4-field set (used by
+                  the Streamlit toggle, which already shows the identifying
+                  columns in the main table);
                   INTERNAL_TRACKING_SHEET_COLUMNS prepends a few identifying
                   columns to that same set, since the Excel sheet is
                   physically separate from the main sheet and needs to be
@@ -255,14 +257,16 @@ FIELD_DEFS = [
     ),
     (
         "vehicle_number",
-        "מספר הרכב שביצע את ההובלה, כפי שמופיע בתעודה. שדה למעקב פנימי בלבד "
-        "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוין.",
+        "מספר הרכב (מספר רישוי) שביצע את ההובלה, כפי שמופיע בתעודה. נפוץ בשטרי "
+        "מטען/אישורי הובלה, ולעיתים חסר לגמרי בתעודת שקילה פשוטה - השאר ריק אם "
+        "לא מצוין, אל תנחש ואל תשלים מהקשר.",
         "string",
     ),
     (
         "driver_name",
-        "שם הנהג שביצע את ההובלה, כפי שמופיע בתעודה. שדה למעקב פנימי בלבד "
-        "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוין.",
+        "שם הנהג שביצע את ההובלה, כפי שמופיע בתעודה. נפוץ בשטרי מטען/אישורי "
+        "הובלה, ולעיתים חסר לגמרי בתעודת שקילה פשוטה - השאר ריק אם לא מצוין, "
+        "אל תנחש ואל תשלים מהקשר.",
         "string",
     ),
     (
@@ -347,11 +351,17 @@ def empty_record(filename: str = "", error: str = "") -> dict:
     return record
 
 
-# Order/headers as of 2026-09-01 - right-to-left reading order in the RTL
+# Order/headers as of 2026-09-03 - right-to-left reading order in the RTL
 # main sheet is LEFT-to-right through this list (first entry = column A =
 # visually rightmost, per excel_writer.py's freeze_panes note), confirmed
-# with the user as: מרחב | אתר/מקור | אתר קולט | תאריך | מספר תעודה/אסמכתא |
-# סוג הפסולת | כמות | יחידת מידה | הערות | קובץ מקור.
+# with the user as: מרחב / יחידה ראשית | יחידה / אתר מקור | סוג פסולת |
+# תאריך האיסוף | כמות מדווחת | יחידת מידה | מספר אסמכתא | מספר רכב |
+# שם הנהג | אתר קולט | הערות | קובץ מקור.
+#
+# vehicle_number/driver_name moved onto the main sheet this same change -
+# previously internal-tracking-only (see INTERNAL_TRACKING_FIELDS below,
+# and excel_writer.py's _LEGACY_HEADER_ALIASES for the older column
+# labels this rename supersedes).
 #
 # "confidence"/רמת ביטחון is deliberately NOT a main-sheet column any more -
 # moved to INTERNAL_TRACKING_SHEET_COLUMNS below (see excel_writer.py's
@@ -362,14 +372,16 @@ def empty_record(filename: str = "", error: str = "") -> dict:
 # so a low/medium-confidence row is still visually flagged even without the
 # text column spelling out why.
 EXCEL_COLUMNS = [
-    ("region", "מרחב"),
-    ("site", "אתר/מקור"),
-    ("supplier_or_carrier", "אתר קולט"),
-    ("date", "תאריך"),
-    ("certificate_or_reference", "מספר תעודה/אסמכתא"),
+    ("region", "מרחב / יחידה ראשית"),
+    ("site", "יחידה / אתר מקור"),
     ("waste_type", "סוג הפסולת"),
-    ("quantity", 'כמות (נטו)'),
+    ("date", "תאריך האיסוף"),
+    ("quantity", "כמות מדווחת"),
     ("unit", "יחידת מידה"),
+    ("certificate_or_reference", "מספר אסמכתא"),
+    ("vehicle_number", "מספר רכב"),
+    ("driver_name", "שם הנהג"),
+    ("supplier_or_carrier", "אתר קולט"),
     ("notes", "הערות"),
     ("source_file", "קובץ מקור"),
 ]
@@ -379,9 +391,11 @@ EXCEL_COLUMNS = [
 # Used by streamlit_app.py's "הצג פרטים נוספים" toggle, which appends these
 # to the already-visible main columns, so no identifying columns are
 # repeated here.
+#
+# vehicle_number/driver_name used to live here too, until 2026-09-03 when
+# they were promoted to EXCEL_COLUMNS (main sheet) above - see that list's
+# own comment.
 INTERNAL_TRACKING_FIELDS = [
-    ("vehicle_number", "מס' רכב"),
-    ("driver_name", "שם נהג"),
     ("entry_time", "שעת כניסה"),
     ("exit_time", "שעת יציאה"),
     ("gross_weight", "משקל ברוטו"),
@@ -397,7 +411,7 @@ INTERNAL_TRACKING_FIELDS = [
 # EXCEL_COLUMNS's own note above. Placed right after the identifying columns
 # (source_file/certificate_or_reference/site), before the plain tracking
 # fields, so it reads as "here's who/what this row is, and how sure we were
-# about it" before the raw vehicle/time/weight data.
+# about it" before the raw time/weight data.
 INTERNAL_TRACKING_SHEET_COLUMNS = [
     ("source_file", "קובץ מקור"),
     ("certificate_or_reference", "מספר תעודה/אסמכתא"),
