@@ -106,7 +106,17 @@ _SYSTEM_PROMPT = (
     "פעם נוספת על כל ספרה שקראת ווודא שלא התבלבלת בין ספרות דומות בכתב יד "
     "(0/6/8, 1/7, 3/8, 4/9) ושמיקום הנקודה העשרונית נכון; אין צורך לכתוב את תהליך "
     "הבדיקה הזה בשום שדה - רק לוודא אותו לפני שאתה עונה. אותה זהירות חלה גם על "
-    "שדות ברוטו/טרה כשהם קיימים בתעודה - הם נבדקים בקוד מול הכמות (נטו) שדווחה. "
+    "שדות ברוטו/טרה כשהם קיימים בתעודה - הם נבדקים בקוד מול הכמות (נטו) שדווחה. "    "כשמופיעים בתעודה שלושה משקלים - ברוטו, טרה ונטו - בשלוש תיבות צמודות, "
+    "כל אחת עם תווית מודפסת לידה: התווית הצמודה פיזית למספר היא המקור היחיד "
+    "לקביעה איזה מספר הוא מה. אל תקבע זאת לפי גודל המספרים. בפרט אל תניח "
+    "שהטרה גדולה מהנטו - במשאית שמפנה חומר כבד (עודפי חפירה, פסולת בניין) "
+    "הנטו עשוי להיות גדול מהטרה, וההנחה ההפוכה היא הטעות שנצפתה בפועל. "
+    "שים לב במיוחד: החישוב 'נטו = ברוטו פחות טרה' לא יכול לעזור לך להחליט "
+    "איזה מהשניים הוא הנטו, כי הוא יוצא נכון גם בשיוך הפוך (אם ברוטו פחות "
+    "טרה שווה נטו, אז ברוטו פחות נטו שווה טרה) - אל תתייחס אליו כאישור. רק "
+    "התוויות קובעות. החוקיות היחידה שכן שימושית: ברוטו הוא תמיד הגדול "
+    "מהשלושה. בשדה הכמות מלא את הנטו, לא את הטרה - הטרה היא משקל הרכב הריק "
+    "ואינה כמות פסולת. "
     "בחלק מהספקים (לא כולם) מופיעים זוגות של שני מסמכים סמוכים המתעדים את אותה "
     "פעולת פינוי: 'תעודת שקילה/משלוח' ממוחשבת עם ברוטו/טרה/נטו ומספר תעודה, "
     "ולידה 'אישור ביצוע עבודה/הטמנה' כתוב-יד עם מספר אסמכתא (המפנה למספר "
@@ -324,11 +334,39 @@ def _flag_possibly_reversed_text(record: dict) -> None:
 
 
 def _flag_gross_tare_mismatch(record: dict) -> None:
-    """Sanity-checks ברוטו - טרה = נטו whenever both gross_weight and
-    tare_weight are present on a record, regardless of whether it's part of
-    a weighing/completion document pair (see _cross_check_document_pair,
-    which is a separate, pair-level check) - the arithmetic must hold on any
-    single certificate that reports all three values.
+    """Sanity-checks the ברוטו/טרה/נטו triple on any single certificate that
+    reports all three, regardless of whether it's part of a weighing/completion
+    document pair (see _cross_check_document_pair, a separate pair-level
+    check).
+
+    Three independent failure classes, all flagged as "נמוכה" with a note
+    naming the actual numbers:
+
+      1. **Non-positive** ברוטו/טרה - a weighed vehicle can't weigh zero;
+         this is a misread, not a real measurement.
+      2. **ברוטו is not the largest of the three** - physically impossible
+         (gross = vehicle + load), so the three values were assigned to the
+         wrong fields. Catches every mislabeling that involves the gross
+         value itself.
+      3. **ברוטו - טרה != נטו** - the original arithmetic check.
+
+    **What this function structurally CANNOT catch, and why** (2026-09-15,
+    found on real data - see CLAUDE.md): a pure טרה<->נטו swap. If the true
+    values satisfy `gross - tare = net`, then `gross - net = tare` holds
+    just as well, so a record reporting tare and net the other way round
+    satisfies check 3 exactly. The arithmetic is symmetric in those two
+    fields; no amount of checking the three numbers harder can distinguish
+    the two labelings, because they are genuinely indistinguishable. Real
+    example: the document reported טרה=21,500 / ברוטו=62,760 / נטו=41,260 and
+    the model returned tare=41,260 with quantity=21,500 - 62760-41260=21500
+    passed cleanly while the reported quantity was the tare.
+
+    That case needs evidence from outside the three numbers, which is what
+    `pipeline._flag_swapped_tare_net()` provides (the same vehicle's tare
+    seen on another document in the batch). The primary defense is the
+    quantity/gross/tare field descriptions in fields.py, which now spell out
+    the per-box labels and the ordering invariant - don't rely on this
+    function for the swap case.
 
     Only runs when the unit is blank or ק"ג (gross/tare are almost always
     reported in ק"ג on a weighing slip - see gross_weight/tare_weight's
@@ -342,15 +380,33 @@ def _flag_gross_tare_mismatch(record: dict) -> None:
     net = parse_quantity(record.get("quantity"))
     if gross is None or tare is None or net is None:
         return
-    gap = (gross - tare) - net
-    if abs(gap) <= _GROSS_TARE_TOLERANCE:
+
+    issues = []
+
+    if gross <= 0 or tare <= 0:
+        issues.append(
+            f'ברוטו/טרה אינם חיוביים (ברוטו={gross:g}, טרה={tare:g}) - קריאה שגויה'
+        )
+    elif tare > gross + _GROSS_TARE_TOLERANCE or net > gross + _GROSS_TARE_TOLERANCE:
+        # gross = vehicle + load, so it is always the largest of the three.
+        issues.append(
+            f'ברוטו אינו הגדול מהשלושה (ברוטו={gross:g}, טרה={tare:g}, '
+            f'נטו={net:g}) - ייתכן שהשדות התחלפו'
+        )
+    else:
+        gap = (gross - tare) - net
+        if abs(gap) > _GROSS_TARE_TOLERANCE:
+            issues.append(
+                f'פער בין ברוטו-טרה לנטו המדווח: {abs(gap):g} ק"ג '
+                f"(ברוטו={gross:g}, טרה={tare:g}, נטו={net:g})"
+            )
+
+    if not issues:
         return
-    note = (
-        f'פער בין ברוטו-טרה לנטו המדווח: {abs(gap):g} ק"ג '
-        f"(ברוטו={gross:g}, טרה={tare:g}, נטו={net:g})"
-    )
+    note = "; ".join(issues)
     record["confidence"] = "נמוכה"
-    record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+    if note not in (record.get("notes") or ""):
+        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
 def _flag_bill_of_lading_estimate(record: dict) -> None:

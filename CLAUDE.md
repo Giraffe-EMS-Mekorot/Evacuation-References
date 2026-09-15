@@ -773,6 +773,108 @@ anchoring on `print(f"\nנשמר: ...")` in main.py silently fails to match), an
 an apostrophe inside the body can break shell parsing outright. Write the
 patch script to a file and run that instead.
 
+## Field order in FIELD_DEFS is load-bearing, and two prompt lessons (2026-09-15)
+
+Three bugs found while verifying the weighing-certificate feature above
+against real documents. All three share one root cause pattern, and it is the
+most reusable thing in this file: **under forced tool use with thinking off,
+the model answers fields in schema order, and it cannot answer a question that
+requires information it doesn't have.** Violate either and it silently returns
+a wrong value or a blank - never an error.
+
+### 1. `quantity` returned the טרה instead of the נטו - fixed by REORDERING fields
+
+On `input/תעודת_שקילה_70483.png` (weights row reading
+`טרה 21,500 | ברוטו 62,760 | נטו 41,260`), the pipeline reported
+`quantity = 21,500` - the tare - with `gross_weight = 62,760` and
+`tare_weight = 41,260`. Reproduced on three consecutive runs.
+
+The diagnosis mattered more than the fix, because two rounds of prompt
+tightening changed nothing:
+- Asked plainly, outside the tool schema ("report each box's label and its
+  number, verbatim"), the same model answered **perfectly**:
+  `טרה=21,500 / ברוטו=62,760 / נטו=41,260`. So it was not a reading or
+  label-association failure.
+- Not `image_preprocessing` (identical output with and without) and not our
+  code (dumping the raw `tool_use.input` showed `21500` coming straight from
+  the model).
+- **`FIELD_DEFS` listed `quantity` about twelve fields before
+  `gross_weight`/`tare_weight`.** The model had to commit to a quantity
+  before it had looked at the labelled ברוטו/טרה boxes, then back-filled
+  `tare_weight = 41,260` so that ברוטו − טרה still equalled the quantity it
+  had already emitted. Moving those two entries to sit immediately *before*
+  `quantity` fixed it outright - `quantity=41,260`, `tare=21,500` - with no
+  prompt change at all.
+
+**Rule: a field that is derived from, or constrained by, other fields must be
+listed after them in `FIELD_DEFS`.** Everything else that consumes that list
+builds a dict keyed by name and is order-independent (`empty_record()`,
+`_extract_page`'s record comprehension, `examples_library`), and
+`EXCEL_COLUMNS` governs column order separately - so reordering is safe, but
+never assume it is inconsequential. There is a comment saying so on the list
+itself now.
+
+### 2. Two classification fields asked the model what it could not know
+
+The same mistake, twice, in two different fields - and this file already
+recorded it once for `CERT_ROLE_WEIGHING` on 2026-08-30:
+
+- **`cert_role`** - the first version of the weighing-certificate description
+  listed "the header company name appears as אתר קולט on ordinary source
+  documents" as an identifying sign. The model has one page; it cannot check
+  other documents. It returned blank on a textbook-matching document.
+- **`reference_number`** - the long-standing description said to fill it
+  "only when a separate field explicitly refers to **another document's**
+  certificate number", and to leave it blank otherwise. On a delivery note
+  with `אסמכתא : 70483` printed plainly in its header, the model left it
+  **blank on two runs out of three** - it can't verify what the number refers
+  to, so it declined. That silently broke the whole cross-match (no
+  `reference_number` → no match attempt → the אסמכתא column fell back to the
+  note's own `102050` and its weighing certificate was filed as an orphan).
+  Note how this failed: not with an error, but as a plausible-looking row.
+
+Both are now phrased as mechanical instructions - copy what is printed next to
+this label; you are not being asked whether it points anywhere; the matching
+happens in code. **When adding or editing a field description, check whether
+answering it requires anything beyond the page in front of the model. If it
+does, the field will quietly come back blank.**
+
+### 3. A symmetric invariant cannot disambiguate - don't ask the model (or the code) to
+
+`gross - tare = net` and `gross - net = tare` are the same equation, so a
+tare<->net swap satisfies it exactly. Two consequences, both learned the hard
+way here:
+- `extractor._flag_gross_tare_mismatch()` provably cannot catch that swap. It
+  now checks what it *can* decide - positivity, and that ברוטו is the largest
+  of the three (physically mandatory, catches every mislabeling involving the
+  gross value) - and its docstring says outright that the swap is out of
+  reach.
+- **Telling the model to "verify that נטו = ברוטו − טרה" was useless for the
+  same reason** - the wrong labeling passes that check too. The instruction
+  that helped was the opposite: *this arithmetic cannot confirm your
+  assignment, only the printed labels can, and do not infer from magnitude -
+  a loaded truck's payload can exceed its own empty weight.*
+
+`pipeline._flag_swapped_tare_net()` is the one check that can catch a swap,
+because it brings in evidence from outside the three numbers: the same
+vehicle's tare on another document in the batch (a vehicle's tare is roughly
+constant, its net load is not). Flags both candidate values in a note, never
+auto-corrects, and needs a second document for that vehicle to say anything -
+tare weights live on the "מעקב פנימי" sheet, which `read_existing_records()`
+does not read, so no cross-run history is available to it.
+
+### Verification standard used here, worth reusing
+
+One passing live run was not treated as evidence, because these failures are
+nondeterministic - `reference_number` came back blank on some runs and
+correct on others with identical code. The acceptance check
+(`quantity=41,260`, `אסמכתא=70,483`, one main row, the weighing certificate
+stripped to its number and marked matched, two differently-targeted
+hyperlinks, `gross=62,760`, `tare=21,500`) was run **three consecutive times
+and passed 12/12 criteria on all three**, with the weighing certificate
+deliberately processed first each time. For an extraction-quality change,
+re-run the real check several times before believing it.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This

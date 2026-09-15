@@ -37,6 +37,13 @@ from .quantity_check import build_quantity_history, flag_quantity_outlier
 # slip) rather than two adjacent pages of the same PDF.
 _ESTIMATE_DATE_PROXIMITY_DAYS = 3
 
+# How close two reported tare weights for the SAME vehicle must be to count as
+# "the same tare" in _flag_swapped_tare_net. Relative, with an absolute floor,
+# because a vehicle's own empty weight does drift a little between weighings
+# (fuel, mud, a tool left in the cab) but not by tens of percent.
+_VEHICLE_TARE_REL_TOLERANCE = 0.05
+_VEHICLE_TARE_ABS_FLOOR = 50.0
+
 
 def _is_real_weighing_candidate(record: dict) -> bool:
     """True if `record` looks like an actual completed weighing - real,
@@ -118,6 +125,82 @@ def _cross_check_bill_of_lading_estimates(records: List[dict]) -> None:
             if note not in (estimate.get("notes") or ""):
                 estimate["notes"] = f"{estimate['notes']} | {note}" if estimate.get("notes") else note
             break
+
+def _tares_match(a: float, b: float) -> bool:
+    """True if two reported tare weights plausibly describe the same vehicle -
+    see _VEHICLE_TARE_REL_TOLERANCE."""
+    allowed = max(abs(a), abs(b)) * _VEHICLE_TARE_REL_TOLERANCE
+    return abs(a - b) <= max(allowed, _VEHICLE_TARE_ABS_FLOOR)
+
+
+def _flag_swapped_tare_net(records: List[dict]) -> None:
+    """Catches the one gross/tare/net error that arithmetic provably cannot:
+    a טרה<->נטו swap.
+
+    `gross - tare = net` and `gross - net = tare` are the same equation, so a
+    record that reports those two fields the other way round passes
+    `extractor._flag_gross_tare_mismatch()` perfectly (see that function's
+    docstring for the real 2026-09-15 example that motivated this). The three
+    numbers on one document simply do not contain the information needed to
+    tell the two labelings apart - so this check brings in evidence from
+    outside them: **the same vehicle's tare as reported on another document
+    in the batch.**
+
+    A vehicle's tare is a property of the vehicle, so it should be roughly
+    constant across its certificates, while its net load varies per trip.
+    For each record of a vehicle seen more than once, if its reported tare
+    disagrees with the other documents' tares for that vehicle *and* its
+    reported quantity (net) matches them instead, the two fields were almost
+    certainly swapped on this record.
+
+    **Flags, never corrects** - consistent with the rest of this pipeline.
+    Rewriting quantity here would mean choosing a labeling on heuristic
+    grounds, and a wrong auto-correction is worse than a flagged row: the
+    note names both candidate values so a reviewer can settle it against the
+    document in one look. Escalates to "נמוכה" because a swapped quantity is
+    a wrong number in the main data column, not a cosmetic issue.
+
+    Needs at least two documents for the same vehicle to say anything at all;
+    a single weighing certificate in a batch is left alone (there is nothing
+    to corroborate it against). Note the corroboration is batch-only: tare
+    weights live on the "מעקב פנימי" sheet, which `read_existing_records()`
+    does not read, so a previously-processed file's tares are not available
+    here.
+    """
+    by_vehicle: dict = {}
+    for record in records:
+        vehicle = (record.get("vehicle_number") or "").strip().casefold()
+        if not vehicle:
+            continue
+        tare = parse_quantity(record.get("tare_weight"))
+        net = parse_quantity(record.get("quantity"))
+        if tare is None or net is None or tare <= 0 or net <= 0:
+            continue
+        by_vehicle.setdefault(vehicle, []).append((record, tare, net))
+
+    for vehicle, entries in by_vehicle.items():
+        if len(entries) < 2:
+            continue
+        for index, (record, tare, net) in enumerate(entries):
+            other_tares = [t for k, (_r, t, _n) in enumerate(entries) if k != index]
+            if not other_tares:
+                continue
+            # Consistent with at least one other document for this vehicle -
+            # nothing to suspect, whichever way round the others are.
+            if any(_tares_match(tare, other) for other in other_tares):
+                continue
+            # Its tare matches nothing, but its NET matches the tare the rest
+            # of this vehicle's documents agree on - the classic swap.
+            if not any(_tares_match(net, other) for other in other_tares):
+                continue
+            note = (
+                f"ייתכן שטרה ונטו התחלפו: הכמות המדווחת ({net:g}) תואמת לטרה של "
+                f"אותו רכב במסמך אחר, בעוד הטרה המדווחת ({tare:g}) אינה - "
+                f'בדוק מול התעודה איזה מהם הנטו'
+            )
+            record["confidence"] = "נמוכה"
+            _append_note(record, note)
+
 
 _NO_WEIGHING_MATCH_NOTE = "לא אותרה תעודת שקילה תואמת באצווה זו"
 
@@ -317,6 +400,11 @@ def process_files(
     replaced with a real weighing record's, if one matching by vehicle+site+
     nearby date turns up anywhere else in this same batch.
 
+    _flag_swapped_tare_net() also runs batch-wide, flagging a record whose
+    טרה/נטו look swapped judged against the same vehicle's tare on another
+    document - the one gross/tare/net error the per-record arithmetic check
+    in extractor.py provably cannot detect.
+
     Then _cross_check_weighing_certificates() runs, also once over the whole
     batch: every separate תעודת שקילה page in it (routed into
     ProcessResult.weighing_certificates, never into .records) is matched by
@@ -390,6 +478,7 @@ def process_files(
                 record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
             records.append(record)
     _cross_check_bill_of_lading_estimates(records)
+    _flag_swapped_tare_net(records)
     _cross_check_weighing_certificates(records, weighing_certificates)
     return ProcessResult(
         records=records, skipped=skipped, weighing_certificates=weighing_certificates
