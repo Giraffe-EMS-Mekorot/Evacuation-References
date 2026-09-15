@@ -1029,16 +1029,16 @@ selection; the note only annotates disagreement.
 
 ### Two parsing traps, both of which bit on the first run
 
-**1. Bidi extraction wedges punctuation *between* words.** The PDF stores RTL
-Hebrew laid out left-to-right, so a line arrives token-reversed with colons on
-the wrong side of their word: `מס. לקוח: KM103527` extracts as
-`,KM103527 :לקוח .מס`, and critically the two-word label `שם תחנה:` arrives
-as **`שם :תחנה`** - colon in the middle. Matching `"שם תחנה"` against the
-token-reversed line therefore never fires, and on the first run against the
-real file **all 68 rows** were flagged unparsed. Marker matching now goes
-through `_normalized()` (token-reverse, strip `:`/`,`, collapse whitespace),
-never `_logical()`. `_fix_swapped_hyphens()` separately restores `מ-8` from
-the `8-מ` bidi produces.
+**1. RTL text order. Solved with character geometry, not token reversal - see
+the dedicated section below**, which supersedes the first implementation
+described here. Short version: the extracted character stream is in neither
+logical nor reliably visual order, so `_logical_lines()` takes line breaks
+from pdfium and character order from each character's x coordinate. The
+original approach reversed each line's *tokens*, which fixed word order but
+not punctuation, and made marker matching fail outright (`שם תחנה:` arrives
+with the colon wedged in the middle, `שם :תחנה`, so matching `"שם תחנה"`
+silently never fired - on the first run that flagged **all 68 rows** as
+unparsed).
 
 **2. A station block continues across a page break.** Its rows on the next
 page have no repeated `שם תחנה` header. Station state was initialized per
@@ -1055,6 +1055,70 @@ that behavior if this parser is ever reworked.
 A third detail in the same family: **the date is printed only when it
 changes.** Rows continuing a month leave the cell empty, so the month is
 forward-filled from the last row that had one, reset at each new station.
+
+### RTL text extraction: geometry, not token reversal (2026-09-15)
+
+The first implementation reversed each line's tokens. That was replaced after
+checking what the PDF actually contains, and the check is the reusable part:
+**the extracted character stream is in neither logical nor reliably visual
+order.** Printing each character's x coordinate for `מ"שח` shows it:
+
+```
+'מ' x=453.6   sorted right-to-left by x:
+'"' x=458.7     ש(467) ח(462) "(458.7) מ(453.6)  ->  שח"מ   (correct)
+'ש' x=467.0
+'ח' x=462.4
+```
+
+So word order was never the real problem - it was already right. The defect
+was punctuation attaching to the wrong neighbour, which token reversal cannot
+reach: `בע"מ` came out `מ"בע`, `ו' סגור` came out `ו סגור'`, `ת"א` came out
+`א"ת`, `ב"ש` came out `ש"ב`. **Those last two are Tel Aviv and Be'er Sheva -
+wrong data, not cosmetics.**
+
+`_logical_lines()` now does three things:
+
+1. **Line breaks from pdfium's own text stream.** Reconstructing lines by
+   clustering characters on their y coordinate was tried first and does NOT
+   work here: the characters of one visual line spread over more than 5
+   points, which split data rows into fragments and dropped the spaces
+   between words (`'י10222026ילי115ייט'`). Don't retry it.
+2. **Character order within a line from each character's x coordinate**
+   (`get_charbox`) - the true visual left-to-right order.
+3. **Visual -> logical**: reverse the line, then re-reverse each left-to-right
+   run (`_LTR_RUN`: Latin, digits, and the separators inside them). Without
+   step 3, `KM103527`, `1,140` and `20/08/26` come out backwards.
+
+**`python-bidi` is the wrong tool for this and was deliberately not used.** It
+implements the Unicode Bidi Algorithm in the logical -> visual direction
+(`get_display`); this problem needs the inverse, and the UBA is not trivially
+invertible. The page's own coordinates are better evidence than any
+reconstruction, and using them added no dependency.
+
+A bonus: lines now arrive in the document's real column order
+(`ינו-2026 קרטון 1022 איסוף קרטון לפי קוב 115` - תאריך, סוג החומר, מק"ט,
+תאור מוצר, משקל), so `_parse_data_row()` reads columns from the ends inward
+instead of unreversing anything, and `_DATE_RE` matches `ינו-2026` rather than
+the old `2026-ינו`.
+
+**Result, measured against the committed previous version rather than from
+notes** (load the old module via `git show HEAD:app/kmm_report.py` - that
+comparison is worth repeating if this layer is ever touched again): 9 of the
+16 station names corrected, plus 3 addresses
+(`ח"ר טובים 2` -> `ר"ח טובים 2`, `היצירה 2 .ת.א` -> `היצירה 2 א.ת.`,
+`וילסון נקרא/6 גם לינקולן` -> `וילסון 6/נקרא גם לינקולן`); the 7 station
+names that were already correct unchanged; and **every numeric and structural
+field byte-identical** - quantity, waste_type, date, unit,
+certificate_or_reference, page_number, 68 rows, 18,670 ק"ג.
+
+One artifact remains and is correct to leave: `שח"מ` may be `שח"ם` with a
+final mem in reality, but the PDF contains a regular mem, so the parser is
+faithful to the source rather than guessing.
+
+**This is the only place in the project that extracts PDF text.** Every other
+document type is rasterized and read by the vision model (extractor.py), and
+`excel_input.py` reads xlsx - so no other extracted field is affected by RTL
+order, and this fix covers everything that is.
 
 ### Isolation from the other mechanisms
 

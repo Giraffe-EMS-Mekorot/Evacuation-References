@@ -23,25 +23,59 @@ customer-center -> station -> month -> material, and one real file
 data rows. A row here is one (station, month, material) triple with its own
 weight.
 
-## The two parsing traps in this format
+## RTL text extraction: line breaks from pdfium, character ORDER from geometry
 
-**1. Extracted text is in visual order, not logical order.** The PDF stores
-RTL Hebrew laid out left-to-right, so a line comes out with its words
-reversed and punctuation attached to the wrong side: the header
-`מס. לקוח: KM103527` extracts as `,KM103527 :לקוח .מס`, and `מ-8` as `8-מ`.
-Every line is therefore token-reversed before being read (see `_logical`),
-and fields are located by anchored markers rather than by column position.
+A PDF stores glyphs positioned on the page, not logical text. For Hebrew that
+means the extracted character stream is in neither logical nor reliably visual
+order, and punctuation lands beside the wrong neighbour: `בע"מ` came out as
+`מ"בע`, `ו' סגור` as `ו סגור'`, `ת"א` as `א"ת`.
 
-**2. A date is printed only when it changes.** Consecutive rows in the same
-month leave the date cell empty - 7 of the 68 rows in the real file do. The
-date is forward-filled from the last row that had one (`_DATE_RE`), reset at
-each new station. Without that, those 7 rows would silently get a blank
-תאריך.
+An earlier version reversed each line's *tokens* to compensate. That fixed
+word order but could not fix anything inside or between tokens, and it also
+made marker matching fragile (a two-word label like `שם תחנה:` arrives with
+the colon wedged in the middle, `שם :תחנה`, so matching `"שם תחנה"` silently
+never fired - on the first real run that flagged all 68 rows as unparsed).
 
-Because both traps are silent-corruption risks rather than crashes, any data
-line that does not parse is turned into a flagged record with the raw line in
-its notes (see `_unparsed_record`) rather than skipped - a dropped row here
-would be invisible.
+`_logical_lines()` replaces it with real geometry:
+
+  1. **Line segmentation comes from pdfium's own text stream** - its `\r\n`
+     boundaries are reliable and give exactly the document's 58/40 lines.
+     Reconstructing lines by clustering characters on their y coordinate was
+     tried first and is *not* reliable here: the characters of one visual line
+     spread over more than 5 points, which split data rows into fragments and
+     dropped the spaces between words.
+  2. **Character order within a line comes from each character's x
+     coordinate** (`get_charbox`), which is the true visual left-to-right
+     order.
+  3. **Visual -> logical** by reversing the line, then re-reversing each
+     left-to-right run (`_LTR_RUN`: Latin, digits, and the separators inside
+     them). Without step 3, `KM103527`, `1,140` and `20/08/26` would come out
+     backwards; with it, RTL and LTR runs both read correctly.
+
+The result is genuine logical text: a data row reads
+`ינו-2026 קרטון 1022 איסוף קרטון לפי קוב 115` - the document's own column
+order (תאריך, סוג החומר, מק"ט, תאור מוצר, משקל) - so fields are read by
+position from the ends inward rather than by unreversing anything.
+
+This is the only place in the project that extracts PDF *text*; every other
+document type is rasterized and read by the vision model (see extractor.py),
+so no other field is affected by any of this.
+
+## The other parsing trap: a date is printed only when it changes
+
+Consecutive rows in the same month leave the date cell empty - 7 of the 68
+rows in the real file do. The month is forward-filled from the last row that
+had one, reset at each new station. Without that, those 7 rows would silently
+get a blank תאריך.
+
+A station block also continues across a page break with no repeated header,
+so station state deliberately lives outside the page loop in
+parse_kmm_report() - see the comment there.
+
+Because every one of these is a silent-corruption risk rather than a crash,
+any data line that fails to parse becomes a flagged record carrying its raw
+text (`_unparsed_record`) instead of being skipped - a dropped row in a
+68-row report is invisible.
 """
 import re
 from pathlib import Path
@@ -68,7 +102,9 @@ _ADDRESS_MARKER = "כתובת"
 # date field per spec ("כפי שמופיע במקור ... לא להמיר לפורמט תאריך מדויק"),
 # which also means derive.derive_year_month() will not parse it - deliberate,
 # see parse_kmm_report().
-_DATE_RE = re.compile(r"^\d{4}-[֐-׿]{3}$")
+# A month cell in logical order: "ינו-2026". (Before the geometry-based
+# extraction below it arrived as "2026-ינו" and had to be un-swapped.)
+_DATE_RE = re.compile(r"^[֐-׿]{3}-\d{4}$")
 _WEIGHT_RE = re.compile(r"^[\d,]+$")
 _SKU_RE = re.compile(r"^\d+$")
 
@@ -95,82 +131,101 @@ MATERIAL_TO_WASTE_TYPE = {
 _BASE_NOTE = 'מתוך דוח קמ"מ מרוכז'
 
 
-# A token like "8-מ", which is how bidi extraction renders "מ-8" (digits and
-# Hebrew swap sides around the hyphen). Only the digits+Hebrew case is
-# corrected; a Hebrew-Hebrew hyphenation like "חודש-אשכול" is left alone,
-# since there is no way to tell which side was originally first.
-_SWAPPED_HYPHEN_RE = re.compile(r"^(\d+)-([֐-׿]+)$")
+# Runs that read left-to-right even inside an RTL line: Latin letters, digits,
+# and the separators that appear *inside* such a run ("KM103527", "1,140",
+# "20/08/26", "18:24", "מ-7"'s digit part). Reversing a line flips these too,
+# so each one is flipped back - see _visual_to_logical().
+_LTR_RUN = re.compile(r"[A-Za-z0-9]+(?:[./:,\-][A-Za-z0-9]+)*")
 
 
-def _logical(line: str) -> str:
-    """Reverses a line's token order, turning the PDF's visual-order RTL text
-    into readable logical order - see this module's docstring, trap #1.
+def _visual_to_logical(visual: str) -> str:
+    """Visual (left-to-right as painted) -> logical reading order.
 
-    Token-internal punctuation is NOT fixed here: bidi extraction leaves a
-    colon on the wrong side of its word, so "לקוח:" arrives as ":לקוח" and a
-    two-word label like "שם תחנה:" arrives as "שם :תחנה" - **with the colon
-    wedged between the two words.** That is why marker matching must go
-    through _normalized() below and not this function; matching "שם תחנה"
-    against this output silently never fires, which is exactly what happened
-    on the first run against the real file (all 68 rows were flagged
-    unparsed).
+    Reverses the line, which is correct for a base-RTL line, then restores
+    each left-to-right run so embedded numbers and Latin ids don't come out
+    backwards.
     """
-    return " ".join(reversed(line.split()))
+    return _LTR_RUN.sub(lambda m: m.group(0)[::-1], visual[::-1])
 
 
-def _normalized(line: str) -> str:
-    """_logical() with the stray colons/commas removed and whitespace
-    collapsed - the form to match field markers and slice values out of.
+def _logical_lines(page) -> List[str]:
+    """The page's lines in logical reading order - see this module's docstring.
+
+    Line breaks come from pdfium's own text stream; the order of characters
+    within each line comes from their x coordinates. A character whose box
+    can't be read (never seen on this format, but possible for an odd
+    embedded font) leaves that line in stream order rather than dropping it.
     """
-    text = _logical(line)
-    text = re.sub(r"[:,]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    textpage = page.get_textpage()
+    lines: List[List[tuple]] = []
+    current: List[tuple] = []
+    for index in range(textpage.count_chars()):
+        char = textpage.get_text_range(index, 1)
+        if char in ("\r", "\n"):
+            if current:
+                lines.append(current)
+                current = []
+            continue
+        if not char:
+            continue
+        try:
+            x = textpage.get_charbox(index)[0]
+        except Exception:
+            x = None
+        current.append((x, char))
+    if current:
+        lines.append(current)
 
-
-def _fix_swapped_hyphens(text: str) -> str:
-    """Restores "מ-8" from the "8-מ" that bidi extraction produces, so a
-    station name reads as printed ("...אחיסמך מ-8 עד 15").
-    """
-    return " ".join(
-        _SWAPPED_HYPHEN_RE.sub(lambda m: f"{m.group(2)}-{m.group(1)}", tok)
-        for tok in text.split()
-    )
+    out = []
+    for line in lines:
+        if any(x is None for x, _c in line):
+            visual = "".join(c for _x, c in line)
+        else:
+            visual = "".join(c for _x, c in sorted(line, key=lambda t: t[0]))
+        out.append(_visual_to_logical(visual).strip())
+    return out
 
 
 def _looks_like_data_row(tokens: List[str]) -> bool:
-    """A data row, in VISUAL order, starts with the weight and contains a
-    separate integer מק"ט somewhere after it. Checked on raw (unreversed)
-    tokens because that is the order the weight arrives first in.
+    """A data row, in logical order, ENDS with the weight and contains a
+    separate integer מק"ט before it.
+
+    Both conditions are needed: the report's own column header
+    ("תאריך סוג החומר מק\"ט תאור מוצר משקל") and its parameter line both
+    contain integers, but neither ends in one.
     """
-    if not tokens or not _WEIGHT_RE.match(tokens[0]):
+    if len(tokens) < 3 or not _WEIGHT_RE.fullmatch(tokens[-1]):
         return False
-    return any(_SKU_RE.match(t) for t in tokens[1:])
+    return any(_SKU_RE.fullmatch(t) for t in tokens[:-1])
 
 
-def _station_name(normalized_line: str) -> str:
-    """The full station name as printed next to "שם תחנה:", e.g.
-    "מקורות מרחב מרכז אחיסמך מ-8 עד 15". Bounded by the next field marker
-    ("כתובת") rather than by a comma, since commas inside the name are
-    indistinguishable from the field separator once bidi-mangled.
+def _field_between(line: str, start_marker: str, stop_markers: tuple) -> str:
+    """The text after `start_marker` up to whichever of `stop_markers` comes
+    first. Field boundaries are matched on the labels, not on commas: the
+    values themselves contain commas, and in this format the labels are the
+    only dependable delimiter.
     """
-    if _STATION_MARKER not in normalized_line:
+    if start_marker not in line:
         return ""
-    after = normalized_line.split(_STATION_MARKER, 1)[1]
-    name = after.split(_ADDRESS_MARKER, 1)[0]
-    return _fix_swapped_hyphens(name.strip(" ,:\u05f4"))
+    text = line.split(start_marker, 1)[1]
+    for stop in stop_markers:
+        text = text.split(stop, 1)[0]
+    return text.strip(" ,:")
 
 
-def _station_address(normalized_line: str) -> str:
+def _station_name(line: str) -> str:
+    """The station's full name as printed, e.g.
+    "מקורות מרחב מרכז אחיסמך מ-8 עד 15".
+    """
+    return _field_between(line, _STATION_MARKER, ("כתובת", "קוד סוג"))
+
+
+def _station_address(line: str) -> str:
     """The station's address, for the notes column (per spec, "הכתובת של
-    התחנה אם קיימת בדו"ח, לצורך הקשר"). Bounded by the next field marker
-    after it, which is the customer-type code.
+    התחנה אם קיימת בדו"ח, לצורך הקשר"). Empty for a station that has none -
+    one of the 16 in the real file genuinely doesn't.
     """
-    if _ADDRESS_MARKER not in normalized_line:
-        return ""
-    after = normalized_line.split(_ADDRESS_MARKER, 1)[1]
-    for stop in ("קוד סוג", "תאור סוג", "פרמטר"):
-        after = after.split(stop, 1)[0]
-    return _fix_swapped_hyphens(after.strip(" ,:"))
+    return _field_between(line, _ADDRESS_MARKER, ("קוד סוג", "תאור סוג", "פרמטר"))
 
 
 def _map_waste_type(material: str) -> tuple:
@@ -189,59 +244,46 @@ def _map_waste_type(material: str) -> tuple:
 
 
 def _parse_data_row(tokens: List[str]) -> Optional[dict]:
-    """Splits one visual-order data row into its five printed columns.
+    """Splits one logical-order data row into the report's five columns.
 
-    Visual order is `weight | <product description> | מק"ט | <material> | date?`
-    which is the logical `date? | material | מק"ט | product description | weight`
-    read backwards. Anchoring on the two unambiguous ends - the weight is
-    always token 0, the date (when present) is always the last token - and on
-    the integer מק"ט between them is what makes this robust without needing
-    per-column x-coordinates.
+    Logical order is `date? | material | מק"ט | product description | weight`.
+    Anchored from the ends inward - the weight is the last token, the date
+    (when present) the first, the מק"ט the first bare integer between them -
+    which needs no per-column x coordinates and tolerates the multi-word
+    material ("נייר לבן") and product ("איסוף קרטון לפי קוב") names.
     """
     if not _looks_like_data_row(tokens):
         return None
-    weight = tokens[0]
-    rest = tokens[1:]
+    weight = tokens[-1]
+    rest = list(tokens[:-1])
 
     date = ""
-    if rest and _DATE_RE.match(rest[-1]):
-        date = rest[-1]
-        rest = rest[:-1]
+    if rest and _DATE_RE.fullmatch(rest[0]):
+        date = rest[0]
+        rest = rest[1:]
 
-    sku_index = next((i for i, t in enumerate(rest) if _SKU_RE.match(t)), None)
+    sku_index = next((i for i, t in enumerate(rest) if _SKU_RE.fullmatch(t)), None)
     if sku_index is None:
         return None
 
-    product = _logical(" ".join(rest[:sku_index]))
-    material = _logical(" ".join(rest[sku_index + 1:]))
     return {
         "weight": weight,
         "sku": rest[sku_index],
-        "product": product.strip(),
-        "material": material.strip(),
+        "material": " ".join(rest[:sku_index]).strip(),
+        "product": " ".join(rest[sku_index + 1:]).strip(),
         "date": date,
     }
 
 
-_VISUAL_MONTH_RE = re.compile(r"^(\d{4})-([֐-׿]{3})$")
-
-
 def _month_label(raw_date: str) -> str:
-    """The printed month cell as text, e.g. "ינו 2026".
+    """The printed month cell as display text: "ינו-2026" -> "ינו 2026".
 
-    The token arrives as "2026-ינו" - the bidi rendering of "ינו-2026" - so
-    the two halves are swapped back. Deliberately NOT converted to a real
-    date: per spec the תאריך column keeps the report's own free-text month
-    ("כפי שמופיע במקור ... לא להמיר לפורמט תאריך מדויק"), which also means
-    derive.derive_year_month() will not parse it and year/month stay blank on
-    these records.
+    Deliberately NOT converted to a real date: per spec the תאריך column
+    keeps the report's own free-text month ("כפי שמופיע במקור ... לא להמיר
+    לפורמט תאריך מדויק"), which also means derive.derive_year_month() will
+    not parse it and year/month stay blank on these records.
     """
-    if not raw_date:
-        return ""
-    match = _VISUAL_MONTH_RE.match(raw_date.strip())
-    if match:
-        return f"{match.group(2)} {match.group(1)}"
-    return raw_date.replace("-", " ").strip()
+    return raw_date.replace("-", " ").strip() if raw_date else ""
 
 
 def looks_like_kmm_report(path: Path) -> bool:
@@ -264,12 +306,13 @@ def looks_like_kmm_report(path: Path) -> bool:
         if len(doc) == 0:
             return False
         raw = doc[0].get_textpage().get_text_range()
+        logical = _logical_lines(doc[0])
     except Exception:
         return False
     finally:
         doc.close()
 
-    text = raw + "\n" + "\n".join(_normalized(line) for line in raw.split("\n"))
+    text = raw + "\n" + "\n".join(logical)
     has_issuer = any(m in text for m in _ISSUER_MARKERS) or "k.m.m" in text.lower()
     has_title = any(m in text for m in _REPORT_TITLE_MARKERS)
     return has_issuer and has_title
@@ -328,18 +371,15 @@ def parse_kmm_report(path: Path) -> List[dict]:
     current_date = ""
     try:
         for page_index in range(len(doc)):
-            raw = doc[page_index].get_textpage().get_text_range()
             page_number = page_index + 1
 
-            for line in raw.split("\n"):
-                line = line.strip()
+            for line in _logical_lines(doc[page_index]):
                 if not line:
                     continue
 
-                if _STATION_MARKER in _normalized(line):
-                    normalized = _normalized(line)
-                    station_name = _station_name(normalized)
-                    station_address = _station_address(normalized)
+                if _STATION_MARKER in line:
+                    station_name = _station_name(line)
+                    station_address = _station_address(line)
                     match = _CUSTOMER_NO_RE.search(line)
                     customer_no = match.group(0) if match else ""
                     # A new station restarts the month forward-fill - the
