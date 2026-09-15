@@ -95,7 +95,56 @@ CERT_ROLE_COMPLETION = "אישור ביצוע עבודה/הטמנה"
 # in the same batch (by vehicle+site+nearby date, not a matching id - see
 # that function's docstring for why an id match can't be required here).
 CERT_ROLE_BILL_OF_LADING_ZERO = "שטר מטען (משקל/נפח אפס - הערכה טרם שקילה)"
-CERT_ROLES = [CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION, CERT_ROLE_BILL_OF_LADING_ZERO]
+# A fourth cert_role value (2026-09-15), again unrelated to the
+# WEIGHING/COMPLETION pair above: a half-empty, hand-filled "תעודת שקילה"
+# form that accompanies a computerized תעודת משלוח for the same removal.
+#
+# **The decisive sign is that the weighing table carries no printed values**
+# (נטו/טרה/מס' רכב/תאריך/שעה/משקל cells empty or handwritten). That is exactly
+# what separates it from CERT_ROLE_WEIGHING, whose ברוטו/טרה/נטו table IS
+# computer-printed and full - and it's page-local, which matters: a first
+# version of this description asked the model to notice that the header
+# company name "appears as אתר קולט on ordinary source documents", which is
+# knowledge it cannot have from one page. It returned cert_role blank on a
+# real, textbook-matching document (input/תעודת_משלוח_102050.png, live run
+# 2026-09-15) - the same failure mode CLAUDE.md records for CERT_ROLE_WEIGHING
+# on 2026-08-30, for the same root cause. Every sign is now judgeable from the
+# page in front of the model, and the description says outright that
+# confirming a matching document exists is not its job.
+#
+# Deliberately NOT keyed off the printed title text: the real document's
+# header misprints "תעודת משלוח מס'" while being a weighing certificate, so
+# the description warns about that case explicitly.
+#
+# The ONLY field extracted from a page tagged this way is its own printed
+# header number (certificate_number) - see extractor._strip_weighing_certificate
+# for the code that enforces that, and pipeline._cross_check_weighing_certificates
+# for the batch-level matching of that number against a תעודת משלוח's
+# reference_number. Such a page never becomes a row of its own on the main
+# sheet.
+CERT_ROLE_WEIGHING_CERTIFICATE = "תעודת שקילה נלווית (מספר מודפס בכותרת)"
+CERT_ROLES = [
+    CERT_ROLE_WEIGHING,
+    CERT_ROLE_COMPLETION,
+    CERT_ROLE_BILL_OF_LADING_ZERO,
+    CERT_ROLE_WEIGHING_CERTIFICATE,
+]
+
+# Record keys written by pipeline._cross_check_weighing_certificates onto a
+# תעודת משלוח record once it's been matched 1:1 with a separate
+# CERT_ROLE_WEIGHING_CERTIFICATE page in the same batch. They hold the
+# *other* document's file/page so excel_writer.py can render a second,
+# independently-clickable hyperlink next to the row's own "קובץ מקור" link
+# (see WEIGHING_SOURCE_FILE_COLUMN below). Named here rather than inline in
+# those two modules so the producer and the consumer can't drift.
+WEIGHING_SOURCE_FILE_KEY = "weighing_source_file"
+WEIGHING_PAGE_NUMBER_KEY = "weighing_page_number"
+# Set on a CERT_ROLE_WEIGHING_CERTIFICATE record itself (not on the תעודת
+# משלוח) once it has been consumed by a 1:1 match - excel_writer.py lists
+# only the UNmatched ones on the "מעקב פנימי" sheet, so a weighing
+# certificate that found its delivery certificate isn't also reported as an
+# orphan.
+WEIGHING_MATCHED_KEY = "_weighing_matched"
 
 REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
@@ -124,6 +173,30 @@ HEBREW_MONTHS = [
     "דצמבר",
 ]
 
+# **The ORDER of this list is load-bearing - it is the order the model fills
+# the fields in.** _build_tool_schema() turns it into the forced-tool-use
+# schema, and with thinking off the model emits values in schema order, so a
+# field placed early is answered before the model has looked at whatever a
+# later field would have made it read.
+#
+# gross_weight/tare_weight therefore sit immediately BEFORE quantity
+# (2026-09-15). They used to come ~12 fields after it, and that alone caused
+# a real, reproducible wrong number on the main sheet: on
+# input/תעודת_שקילה_70483.png (boxes reading טרה 21,500 | ברוטו 62,760 |
+# נטו 41,260) the model returned quantity=21,500 - the TARE - and then
+# back-filled tare_weight=41,260 so that ברוטו-טרה still equalled the
+# quantity it had already committed to. Asked plainly, outside the tool
+# schema, the same model read all three labels perfectly; the error appeared
+# only under the schema, and swapping these three entries' order was enough
+# to fix it (quantity=41,260, tare=21,500) with no prompt change at all. Two
+# rounds of prompt tightening beforehand had changed nothing - see CLAUDE.md.
+#
+# So: put a field that is DERIVED FROM or CONSTRAINED BY other fields after
+# the fields it depends on. Every other consumer of FIELD_DEFS builds a dict
+# keyed by name and is order-independent (empty_record(), the record
+# comprehension in _extract_page, examples_library) - EXCEL_COLUMNS governs
+# column order separately - so reordering here is safe, but never assume it
+# is inconsequential.
 FIELD_DEFS = [
     (
         "document_type",
@@ -164,6 +237,31 @@ FIELD_DEFS = [
         "string",
     ),
     (
+        "gross_weight",
+        "משקל ברוטו (משקל הרכב יחד עם המטען), מספר בלבד (ללא יחידת מידה) - "
+        "מופיע בעיקר בתעודות שקילה ממוחשבות, יחד עם טרה ונטו, בשלוש תיבות "
+        "צמודות. זהה אותו לפי התווית 'ברוטו' הצמודה לתיבה שלו, לא לפי מקומה "
+        "בשורה. **ברוטו הוא תמיד הגדול משלושת הערכים** - אם הערך שמילאת כאן "
+        "אינו הגדול, שייכת את התיבות לא נכון וצריך לקרוא שוב. משמש בקוד "
+        "לבדיקת סבירות מול הכמות (נטו) שדווחה (ברוטו פחות טרה אמור להיות שווה "
+        "לנטו) - קרא כל ספרה בזהירות, כמו בשדה הכמות. השאר ריק אם לא מופיע "
+        "בתעודה.",
+        "string",
+    ),
+    (
+        "tare_weight",
+        "משקל טרה (משקל הרכב הריק, בלי המטען), מספר בלבד (ללא יחידת מידה) - "
+        "מופיע בעיקר בתעודות שקילה ממוחשבות, יחד עם ברוטו ונטו, בשלוש תיבות "
+        "צמודות. זהה אותו לפי התווית 'טרה' הצמודה לתיבה שלו, לא לפי מקומה "
+        "בשורה. **אל תבלבל בין טרה לנטו** - זו טעות שנצפתה בפועל. קבע מה טרה "
+        "ומה נטו לפי התוויות המודפסות הצמודות למספרים בלבד, ולא לפי גודל "
+        "המספרים: אל תניח שהטרה גדולה מהנטו, כי במטען כבד היא קטנה ממנו. "
+        "שים לב שהחישוב ברוטו-פחות-טרה ייצא נכון גם אם תחליף בין השניים, ולכן "
+        "אינו יכול לשמש לך אישור לשיוך. קרא כל ספרה בזהירות, כמו בשדה הכמות. "
+        "השאר ריק אם לא מופיע בתעודה.",
+        "string",
+    ),
+    (
         "quantity",
         "הכמות, מספר בלבד (ללא יחידת מידה), למשל 12.5. אין ניסוח קבוע אחד לשדה הזה "
         "- הוא עשוי להופיע תחת כותרות שונות (כמות לחיוב, משקל נטו, משקל טרה/ברוטו, "
@@ -172,6 +270,26 @@ FIELD_DEFS = [
         "אם קיימת, ואחרת 'משקל נטו' (לא ברוטו/טרה - נטו הוא כמות הפסולת בפועל). "
         "אם קיימים בתעודה גם שדות ברוטו/טרה נפרדים - מלא אותם בשדות ברוטו/טרה "
         "בנוסף לשדה זה, לא במקומו. "
+        "**קריאת שלושת המשקלים - כאן נצפתה טעות אמיתית, קרא בעיון:** בתעודות "
+        "שקילה ממוחשבות רבות מופיעים ברוטו, טרה ונטו בשלוש תיבות צמודות באותה "
+        "שורה, כל אחת עם תווית מודפסת לידה. "
+        "**התווית המודפסת הצמודה למספר היא המקור היחיד לקביעה איזה מספר הוא "
+        "מה. אל תקבע זאת לפי גודל המספרים - בשום אופן.** בפרט: אל תניח שהטרה "
+        "גדולה מהנטו. במשאית שמפנה חומר כבד (עודפי חפירה, פסולת בניין) הנטו "
+        "עשוי בהחלט להיות גדול מהטרה, וההנחה ההפוכה היא בדיוק מה שגורם לטעות. "
+        "**אזהרה חשובה: החישוב 'נטו = ברוטו פחות טרה' אינו יכול לעזור לך "
+        "לזהות איזה מהשניים הוא הנטו.** אם תחליף בין טרה לנטו, החישוב ייצא "
+        "נכון בדיוק באותה מידה (כי אם ברוטו פחות טרה שווה נטו, אז גם ברוטו "
+        "פחות נטו שווה טרה). לכן אל תסתמך על החישוב כאישור לשיוך שעשית - הוא "
+        "יאשר גם שיוך הפוך. רק התוויות קובעות. "
+        "הסדר הפיזי של התיבות בשורה משתנה בין ספקים (ב-RTL הוא עשוי להיות "
+        "טרה, ברוטו, נטו) - אל תניח שהתיבה הראשונה או האחרונה היא הנטו. עבור "
+        "כל אחת משלוש התיבות, אתר את התווית הצמודה אליה פיזית וקרא אותה, "
+        "ורק אז שייך את המספר. "
+        "החוקיות היחידה שכן שימושית לבדיקה: ברוטו הוא תמיד הגדול מהשלושה (הוא "
+        "הרכב יחד עם המטען). אם הערך שסימנת כברוטו אינו הגדול - טעית בשיוך. "
+        "בשדה זה יש למלא את הנטו (כמות הפסולת בפועל), לא את הטרה (משקל הרכב "
+        "הריק) - הטרה אינה כמות פסולת. "
         "זהו השדה הכי קריטי לדיוק בכל התעודה - לפני שאתה קובע את הערך הסופי, קרא "
         "כל ספרה בנפרד ובדוק אותה פעם שנייה (בפרט ספרות שקל להתבלבל ביניהן בכתב "
         "יד: 0/6/8, 1/7, 3/8, 4/9), וודא שמיקום הנקודה העשרונית ומספר הספרות "
@@ -214,11 +332,20 @@ FIELD_DEFS = [
     ),
     (
         "reference_number",
-        "מספר אסמכתא - ממלאים רק כשמופיע בתעודה שדה נפרד המפנה במפורש למספר "
-        "התעודה של מסמך אחר (לרוב בתעודות מסוג 'אישור ביצוע עבודה/הטמנה', ראו "
-        "תפקיד_התעודה_בזוג - שם מצוין מספר האסמכתא של תעודת השקילה/משלוח המתאימה "
-        "לה). אל תמלא כאן את מספר התעודה של המסמך הזה עצמו - זה שייך לשדה "
-        "מספר_תעודה. אם אין בתעודה שדה 'אסמכתא' נפרד שמפנה למסמך אחר - השאר ריק.",
+        "מספר אסמכתא. **זהו שדה מכני, לא שיקול דעת: אם מופיע בתעודה שדה שכתוב "
+        "לידו 'אסמכתא' (או 'אסמכתה', 'מס' אסמכתא', 'אסמכתא מס''), העתק לכאן את "
+        "הערך שלו - וזה הכל.** "
+        "אל תשאל את עצמך אם המספר הזה מפנה למסמך אחר, אם המסמך האחר קיים, או אם "
+        "הוא מתאים למשהו - אינך יכול לדעת זאת מעמוד בודד, וההצלבה נעשית בקוד "
+        "בשלב נפרד. די בכך שהתווית 'אסמכתא' מופיעה בתעודה ויש לידה מספר. "
+        "הערה זו נוספה לאחר שנצפה בפועל מסמך עם שדה 'אסמכתא : 70483' מודפס "
+        "בבירור שהושאר ריק, כי הניסוח הקודם ביקש לוודא שהמספר 'מפנה למסמך אחר'. "
+        "השדה מופיע גם בתעודות משלוח ממוחשבות רגילות וגם בתעודות מסוג 'אישור "
+        "ביצוע עבודה/הטמנה' (ראו תפקיד_התעודה_בזוג) - בשני המקרים פשוט העתק את "
+        "הערך. "
+        "ההגבלה היחידה: אל תמלא כאן את מספר התעודה של המסמך הזה עצמו (זה שמופיע "
+        "בכותרת אחרי 'תעודת משלוח מס'' וכדומה) - הוא שייך לשדה מספר_תעודה. "
+        "אם לא מופיעה בתעודה בכלל תווית 'אסמכתא' - השאר ריק.",
         "string",
     ),
     (
@@ -241,7 +368,35 @@ FIELD_DEFS = [
         "'0 טון') ולא ריק - זה לא אומר שהכמות באמת אפס. סמנו ערך זה כשמזוהה "
         "תבנית כזו, כדי שהכמות תיבדק כהערכה טקסטואלית חלופית ולא כ-0 (ראו "
         "הוראות שדה כמות). "
-        "אם אין לתעודה מבנה מובהק של אף אחד משלושת הדפוסים (המקרה הנפוץ ביותר) - "
+        f"תבנית רביעית, נפרדת ומובהקת: '{CERT_ROLE_WEIGHING_CERTIFICATE}' - "
+        "טופס 'תעודת שקילה' ריק-למחצה שממולא ביד, ומגיע כמסמך נלווה לתעודת "
+        "משלוח ממוחשבת. הסימן המכריע, וזה שצריך להכריע אצלך: **טבלת השקילה "
+        "בגוף המסמך (עמודות כמו נטו / טרה / מס' רכב / תאריך / שעה / משקל) "
+        "אינה מכילה ערכים מודפסים** - התאים בה ריקים לגמרי, או שיש בהם כתב "
+        "יד. סימנים תומכים, כולם נראים בעמוד הזה עצמו: מספר סידורי מודפס "
+        "בכותרת (בניגוד לשאר המסמך שממולא ביד); כותרת/לוגו של חברה (האתר "
+        "הקולט או המוביל); שורות ריקות למילוי ביד (המזמין, כתובת, מ-, ל-, "
+        "מכונית מס', שעת יציאה); וחתימות ידניות בתחתית. "
+        "אזהרת טעות נפוצה: **הכותרת המודפסת עשויה לומר 'תעודת משלוח מס''** - "
+        "אל תיתן לזה להטעות אותך. מסמך שטבלת השקילה שלו ריקה/כתובה ביד הוא "
+        f"'{CERT_ROLE_WEIGHING_CERTIFICATE}' גם כשכתוב בכותרתו 'תעודת משלוח'. "
+        "הקביעה היא לפי המבנה בפועל, לא לפי מה שהכותרת מצהירה. "
+        f"ההבדל מ-'{CERT_ROLE_WEIGHING}': שם טבלת ברוטו/טרה/נטו **מודפסת "
+        "ומלאה בערכים ממוחשבים**; כאן היא ריקה או ידנית. אם הערכים מודפסים - "
+        f"זה '{CERT_ROLE_WEIGHING}' (או תעודה רגילה), לא הערך הזה. "
+        f"ההבדל מ-'{CERT_ROLE_COMPLETION}': שם קיים שדה 'אסמכתא' נפרד המפנה "
+        "למספר תעודה של מסמך אחר; כאן המספר המודפס בכותרת הוא המספר של "
+        "המסמך הזה עצמו, ואין בו שדה אסמכתא. "
+        "קבע זאת לפי הצורה של העמוד הזה בלבד, ובלי קשר לשאלה אם קיים מסמך "
+        "אחר שמתאים לו - אינך צריך (ואינך יכול) לאמת שקיימת תעודת משלוח "
+        "תואמת, וההצלבה ביניהן נעשית בקוד בשלב נפרד. אם העמוד הזה לבדו מציג "
+        "את המבנה הזה - סמן את הערך, גם אם אין לך מושג אם יש לו זוג. "
+        f"כשאתה מסמן '{CERT_ROLE_WEIGHING_CERTIFICATE}' - חלץ מהמסמך הזה אך "
+        "ורק את המספר המודפס בכותרת, אל שדה מספר_תעודה. אל תנסה לחלץ ממנו "
+        "שום שדה אחר (תאריך, שם נהג, מספר רכב, משקל, אתר וכו') גם אם חלקם "
+        "קריאים בפועל - השאר את כולם ריקים. הנתונים לשורה בטבלה נלקחים תמיד "
+        "מתעודת המשלוח הממוחשבת, לא מכאן. "
+        "אם אין לתעודה מבנה מובהק של אף אחד מארבעת הדפוסים (המקרה הנפוץ ביותר) - "
         "השאר ריק.",
         "string",
     ),
@@ -279,22 +434,6 @@ FIELD_DEFS = [
         "exit_time",
         "שעת היציאה של הרכב מהאתר, כפי שמופיעה בתעודה. שדה למעקב פנימי בלבד "
         "(לא מוצג בעמודות הראשיות) - השאר ריק אם לא מצוינת.",
-        "string",
-    ),
-    (
-        "gross_weight",
-        "משקל ברוטו, מספר בלבד (ללא יחידת מידה) - מופיע בעיקר בתעודות שקילה "
-        "ממוחשבות, יחד עם טרה ונטו. משמש בקוד לבדיקת סבירות מול הכמות (נטו) "
-        "שדווחה (ברוטו פחות טרה אמור להיות שווה לנטו) - קרא כל ספרה בזהירות, "
-        "כמו בשדה הכמות. השאר ריק אם לא מופיע בתעודה.",
-        "string",
-    ),
-    (
-        "tare_weight",
-        "משקל טרה (משקל הרכב הריק), מספר בלבד (ללא יחידת מידה) - מופיע בעיקר "
-        "בתעודות שקילה ממוחשבות, יחד עם ברוטו ונטו. משמש בקוד לבדיקת סבירות מול "
-        "הכמות (נטו) שדווחה - קרא כל ספרה בזהירות, כמו בשדה הכמות. השאר ריק אם "
-        "לא מופיע בתעודה.",
         "string",
     ),
     (
@@ -385,6 +524,26 @@ EXCEL_COLUMNS = [
     ("notes", "הערות"),
     ("source_file", "קובץ מקור"),
 ]
+
+# A main-sheet column that is deliberately NOT part of EXCEL_COLUMNS above
+# (2026-09-15). It holds the second of the two hyperlinks a cross-matched row
+# gets - one to the תעודת משלוח page, one to the separate תעודת שקילה page
+# (see CERT_ROLE_WEIGHING_CERTIFICATE and
+# pipeline._cross_check_weighing_certificates). Two independently-clickable
+# links can't live in one cell: Excel supports exactly one hyperlink per
+# cell, so "file_a | file_b" as a single joined string can only ever link to
+# one of them.
+#
+# Kept out of EXCEL_COLUMNS on purpose, rather than added as an ordinary
+# entry: streamlit_app.py derives its editable results table's columns from
+# EXCEL_COLUMNS, so an entry here would silently add a column to that table
+# too - and this change was explicitly scoped to leave the UI alone.
+# excel_writer.py appends it as a trailing column on the Excel main sheet
+# only (after source_file, so no existing column index shifts - the summary
+# sheet's _KEYS.index("source_file") lookup is unaffected), and
+# read_existing_records() maps its header back explicitly so re-extending a
+# project file doesn't drop the link.
+WEIGHING_SOURCE_FILE_COLUMN = (WEIGHING_SOURCE_FILE_KEY, "קובץ תעודת שקילה")
 
 # Collected from every certificate (they're ordinary FIELD_DEFS entries) but
 # kept off the main table/sheet by default - see this module's docstring.
