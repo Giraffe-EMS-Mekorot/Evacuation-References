@@ -875,6 +875,107 @@ and passed 12/12 criteria on all three**, with the weighing certificate
 deliberately processed first each time. For an extraction-quality change,
 re-run the real check several times before believing it.
 
+## Per-batch מרחב/אתר/סוג-פסולת selection replaces extracting them (2026-09-15)
+
+The single biggest change to what the model is asked to do since this project
+started. Three fields - `region`, `site`, `waste_type` - are **no longer
+extracted from the documents at all**. The user picks them once per upload
+batch from closed lists, and they are written onto every row that batch
+produces.
+
+**Why this is an improvement and not just a UI feature:** those were exactly
+the two fields the "Known limitation: don't guess is prompt-only" section
+above documents as this pipeline's most persistent failure - a certificate
+often simply does not say which מרחב it belongs to, so the model inferred one
+and admitted the guess in `הערות`. That whole class of bug is now gone by
+construction rather than caught by validation. `FIELD_DEFS` went from 21
+fields to 18, and neither closed list (`WASTE_TYPES`, `REGIONS`) is sent to
+the model any more.
+
+### Where each piece lives
+
+- **`app/sites_config.py`** (new) - the two-level מרחב -> אתר map, in display
+  order. Reference data with its own update cadence, deliberately not in
+  fields.py (the extraction schema). Nothing here reaches the model.
+  `fields.REGIONS` is set from `REGION_NAMES` so the dropdown, the summary
+  sheet and the results-table dropdown cannot disagree.
+- **`pipeline.BatchSelection` + `apply_batch_selection()`** - applied inside
+  `process_files()`'s per-record loop, *before* the normalizer and
+  quantity-outlier check (the latter is keyed by site, so it needs the real
+  one). Unconditional assignment, not fill-if-blank. Applied to `records`
+  only - never `skipped` or `weighing_certificates`, neither of which becomes
+  a row.
+- **`streamlit_app.py`** - the "שיוך האצווה" card, three cascading
+  selectboxes, gating both the `file_uploader` and the process button.
+- **`main.py`** - optional `--region/--site/--waste-type`. Without them a CLI
+  run leaves the three columns blank, because nothing extracts them any
+  more; the flags exist so the CLI isn't crippled by this change.
+
+### Three consequences that are easy to get wrong
+
+**1. "No sites" is a complete selection, not a missing field.**
+חטיבת הפיתוח has no second level. Gating on `if not site` would make that
+מרחב permanently unusable - the button would never enable and the message
+would say a site is missing when none exists. Always gate on
+`sites_config.region_has_sites(region)`, and use `is_valid_selection()` which
+encodes both rules (a known מרחב, plus one of *its own* sites, or no site
+when it has none). The UI shows a disabled "(לא רלוונטי למרחב זה)" field for
+that case rather than an empty dropdown a user would try to fill.
+
+**2. Changing מרחב must clear the chosen site.** A cascading dropdown invites
+exactly one bug: the site from the previous מרחב stays selected,
+`is_valid_selection()` correctly rejects the pair, and the upload button goes
+dead with no visible reason. `streamlit_app.py` compares the new region
+against `st.session_state.batch_region` and resets `batch_site` on a change;
+the site widget's key also includes the region name, so Streamlit treats it
+as a brand-new widget. Covered by its own AppTest case.
+
+**3. The region rename breaks exact-match aggregation on old rows.** The old
+closed list was `["צפון", "דרום", "מרכז", "מטה"]`; the new one is the six real
+org names. Rows written before this change keep their old short label (an
+explicit requirement - existing projects are not rewritten). The
+`סיכום` sheet counts by exact string match, so untreated, every pre-rename
+row would fall into the "ללא מרחב מזוהה" catch-all and be reported as having
+no region - simply false. Each region row therefore sums its current name
+**plus** any legacy label mapping to it (`fields.LEGACY_REGION_TO_CURRENT`),
+still using only additive exact-value COUNTIF/SUMIF, per this sheet's
+verified-formula rule above. `"מטה"` is spelled identically in both lists and
+is deliberately absent from that map.
+
+### site left the fuzzy normalizer, on purpose
+
+`normalize.NORMALIZED_FIELDS` is now `["supplier_or_carrier"]` only. Keeping
+`site` would have been actively harmful once it comes from a closed list:
+`NameNormalizer` exists to collapse OCR/handwriting spelling variants of a
+model-read name, and it would happily rewrite an exact, user-chosen site to a
+high-scoring neighbour ("נגב צפוני" vs "נגב מרכזי"), silently corrupting a
+value that was never uncertain. `supplier_or_carrier` ("אתר קולט") is still
+model-read and still normalized.
+
+### Deliberately NOT changed
+
+- **The results-table `אתר` column stays free text.** Turning it into a
+  closed-list dropdown would blank or break free-text site values in existing
+  projects. The `מרחב` column there does offer the new list, and
+  `_selectbox_options()` already appends any present-but-unlisted value, so a
+  historical `"צפון"` still renders and stays editable.
+- **Manual-Excel rows don't get the selection.** They come from a
+  human-filled sheet carrying its own values; overwriting them would discard
+  real typed data, which is the whole premise of `app/excel_input.py`.
+
+### Verification
+
+Two new suites: 40 pure-function checks (the mapping, all the
+`is_valid_selection` edge cases, unconditional overwrite, `None` being a
+no-op so existing projects are untouched, end-to-end through `process_files`
+with extraction mocked to return *wrong* values and be overridden) and 31
+`AppTest` checks driving the real widgets (gating with nothing selected,
+cascade contents per מרחב, full selection enabling upload, חטיבת הפיתוח
+completing without a site, and the switch-region-clears-stale-site case).
+Plus a real API run with a selection deliberately contradicting the document
+(מרחב צפון/גליל/פסולת בנין on an אוליצקי "עודפי עפר קידוח" certificate), and
+Playwright screenshots of the live app in each state.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This

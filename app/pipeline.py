@@ -19,6 +19,7 @@ from .excel_writer import parse_quantity, read_existing_records
 # independent copies of that rule would drift.
 from .extractor import _normalize_reference, extract_certificate_pages
 from .fields import (
+    BATCH_SELECTION_KEYS,
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_WEIGHING_CERTIFICATE,
     DOCUMENT_TYPE_OTHER,
@@ -325,6 +326,53 @@ def _cross_check_weighing_certificates(
         cert[WEIGHING_MATCHED_KEY] = True
 
 
+class BatchSelection(NamedTuple):
+    """The מרחב / אתר-מקור / סוג-פסולת the user picked for one whole upload
+    batch (see streamlit_app.py's selection card), which as of 2026-09-15
+    REPLACE reading those three values off each document rather than
+    supplementing them - see apply_batch_selection().
+
+    site is legitimately "" for a מרחב with no second level (חטיבת הפיתוח -
+    see sites_config.region_has_sites); that is a complete selection, not a
+    partial one, so nothing here treats a blank site as missing.
+    """
+
+    region: str
+    site: str
+    waste_type: str
+
+
+def apply_batch_selection(records: List[dict], selection: Optional[BatchSelection]) -> None:
+    """Writes the batch's מרחב/אתר/סוג-פסולת onto every record it is given,
+    overwriting whatever is there.
+
+    This is the whole point of the 2026-09-15 change: those three fields are
+    no longer extracted (they are not in FIELD_DEFS any more), so this is
+    their only source. Unconditional assignment, not "fill if blank" - there
+    is nothing to defer to, and a fill-if-blank would quietly leave a stale
+    value behind if a record ever reached here with one (e.g. a record read
+    back from an older project file and reprocessed).
+
+    A no-op when `selection` is None, which is how existing rows keep their
+    old values: streamlit_app.py only ever passes this to the records of the
+    batch being processed right now, never to
+    st.session_state.baseline_records, and main.py's CLI passes None unless
+    the new --region/--site/--waste-type flags were given. Previously
+    processed certificates are therefore untouched, per an explicit
+    requirement.
+
+    Called on process_files()'s `records` only - deliberately NOT on
+    `skipped` (not certificates at all) or `weighing_certificates` (stripped
+    to a printed number and never a row of their own), since neither becomes
+    a spreadsheet row that would show these columns.
+    """
+    if selection is None:
+        return
+    values = dict(zip(BATCH_SELECTION_KEYS, (selection.region, selection.site, selection.waste_type)))
+    for record in records:
+        record.update(values)
+
+
 # Called as on_progress(index, total, path) right before each file is sent to
 # the model - lets a caller (CLI print, Streamlit status widget) show progress
 # without this module knowing anything about how it's displayed. Fires once
@@ -373,6 +421,7 @@ def process_files(
     on_progress: Optional[ProgressCallback] = None,
     on_error: Optional[ErrorCallback] = None,
     use_examples: bool = False,
+    selection: Optional[BatchSelection] = None,
 ) -> ProcessResult:
     """Extracts one or more records per file, in order (one per page for a
     PDF, one for a plain image). A file that can't even be opened/split at
@@ -411,6 +460,12 @@ def process_files(
     printed-number identity against the תעודת משלוח whose מספר_אסמכתא
     carries that number. See that function's docstring for the
     many-to-many indexing and the duplicate-number handling.
+
+    selection (2026-09-15): the מרחב/אתר-מקור/סוג-פסולת chosen for this whole
+    batch, written onto every returned record by apply_batch_selection().
+    Those three fields are not extracted from the documents at all any more,
+    so without a selection they stay blank. None preserves the pre-change
+    behavior of leaving them alone entirely.
 
     use_examples (default False - inactive/not pursued further per an
     explicit 2026-09 user decision, kept ready but off so it adds zero
@@ -457,6 +512,12 @@ def process_files(
                 # against the batch's delivery certificates below instead.
                 weighing_certificates.append(record)
                 continue
+            # Before the checks below, not after: the quantity-outlier check
+            # is keyed by site (see quantity_check.build_quantity_history), so
+            # it needs the batch's real site, and _enforce_core_field_confidence
+            # has already run inside _extract_page against a field list that
+            # deliberately excludes these three (see _CORE_FIELD_LABELS).
+            apply_batch_selection([record], selection)
             try:
                 normalizer.normalize(record)
                 # quantity is still the raw extractor string here - parsed

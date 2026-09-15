@@ -90,7 +90,15 @@ _SIMILARITY_THRESHOLD = 70
 # list. Both are free text with no closed list (unlike waste_type/region -
 # see fields.py) - exactly the kind of field where the same real-world name
 # comes back spelled differently certificate to certificate.
-NORMALIZED_FIELDS = ["site", "supplier_or_carrier"]
+# site left this list 2026-09-15. It is no longer a free-text value the model
+# read off a certificate - it comes from the user's per-batch selection out of
+# a closed list (app/sites_config.py), so there are no spelling variants to
+# collapse. Worse, leaving it here would be actively harmful: the fuzzy
+# matcher would happily rewrite an exact, user-chosen site name to a
+# near-neighbour it had seen before ("נגב צפוני" -> "נגב מרכזי" scores high),
+# silently corrupting a value that was never uncertain.
+# supplier_or_carrier ("אתר קולט") is still model-read and still normalized.
+NORMALIZED_FIELDS = ["supplier_or_carrier"]
 
 
 class NameNormalizer:

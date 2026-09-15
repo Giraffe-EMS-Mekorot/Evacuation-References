@@ -38,6 +38,7 @@ from app.excel_writer import (
     write_records,
 )
 from app.fields import (
+    BATCH_SELECTION_KEYS,
     CONFIDENCE_LEVELS,
     EXCEL_COLUMNS,
     INTERNAL_TRACKING_FIELDS,
@@ -45,7 +46,8 @@ from app.fields import (
     UNCLASSIFIED_WASTE_TYPE,
     WASTE_TYPES,
 )
-from app.pipeline import process_files
+from app.pipeline import BatchSelection, process_files
+from app import sites_config
 
 # Manually-filled tracking sheets, read directly (no vision call) - see
 # app/excel_input.py. A DIFFERENT feature from config.SUPPORTED_EXTENSIONS,
@@ -471,6 +473,18 @@ if "weighing_certificates" not in st.session_state:
     # keep reporting the unmatched ones on the "מעקב פנימי" sheet instead of
     # losing them after the first write. See app/pipeline.py.
     st.session_state.weighing_certificates = []
+if "batch_region" not in st.session_state:
+    # The per-batch מרחב/אתר/סוג-פסולת selection (2026-09-15). These three
+    # columns are no longer read off the documents at all - see
+    # app/pipeline.py's apply_batch_selection - so this selection is their
+    # only source for every row a new batch produces. Kept in session state
+    # (not just read from the widgets) so the cascading reset below can clear
+    # the site when the מרחב changes.
+    st.session_state.batch_region = None
+if "batch_site" not in st.session_state:
+    st.session_state.batch_site = None
+if "batch_waste_type" not in st.session_state:
+    st.session_state.batch_waste_type = None
 if "baseline_records" not in st.session_state:
     st.session_state.baseline_records = []
 if "output_path" not in st.session_state:
@@ -524,6 +538,119 @@ with st.container(key="upload_card"):
         )
         project_name_input = st.session_state.active_project_name
 
+    st.divider()
+
+    # --- Per-batch מרחב / אתר / סוג פסולת selection (2026-09-15) ----------
+    # These three values are applied to every row this batch produces and are
+    # NOT read from the documents (see app/pipeline.py apply_batch_selection).
+    # All three are therefore required before anything can be uploaded -
+    # otherwise the rows would be written with three permanently blank
+    # columns and no way to recover them from the source files.
+    st.markdown("##### :material/checklist_rtl: שיוך האצווה")
+    st.caption(
+        "השיוך חל על **כל הקבצים שמועלים יחד** באצווה הזו, ולא על קובץ בודד. "
+        "שלושת הערכים נלקחים מהבחירה כאן ולא נקראים מהמסמכים."
+    )
+
+    sel_col1, sel_col2, sel_col3 = st.columns(3)
+
+    with sel_col1:
+        region = st.selectbox(
+            "מרחב",
+            options=sites_config.REGION_NAMES,
+            index=None,
+            placeholder="בחרו מרחב...",
+            key="batch_region_widget",
+        )
+
+    # A מרחב change must not leave the previously-picked site behind (it would
+    # belong to a different מרחב) - sites_config.is_valid_selection() would
+    # reject it, so clear it here rather than silently blocking the button.
+    if region != st.session_state.batch_region:
+        st.session_state.batch_region = region
+        st.session_state.batch_site = None
+
+    site_options = sites_config.sites_for(region) if region else []
+    has_sites = bool(region) and sites_config.region_has_sites(region)
+
+    with sel_col2:
+        if has_sites:
+            site = st.selectbox(
+                "אתר / יחידה",
+                options=site_options,
+                index=None,
+                placeholder="בחרו אתר...",
+                key=f"batch_site_widget_{region}",
+            )
+        elif region:
+            # חטיבת הפיתוח has no second level at all - a blank site is the
+            # correct and complete answer here, so show why instead of an
+            # empty dropdown the user would try to fill.
+            site = ""
+            st.selectbox(
+                "אתר / יחידה",
+                options=["(לא רלוונטי למרחב זה)"],
+                index=0,
+                disabled=True,
+                key=f"batch_site_disabled_{region}",
+                help=f"למרחב {region} אין אתרים משניים - השדה יישאר ריק, וזו בחירה שלמה.",
+            )
+        else:
+            site = None
+            st.selectbox(
+                "אתר / יחידה",
+                options=["בחרו מרחב תחילה"],
+                index=0,
+                disabled=True,
+                key="batch_site_placeholder",
+            )
+    st.session_state.batch_site = site
+
+    with sel_col3:
+        # The already-existing closed waste-type list, not a second copy of it.
+        waste_type = st.selectbox(
+            "סוג פסולת",
+            options=WASTE_TYPES,
+            index=None,
+            placeholder="בחרו סוג פסולת...",
+            key="batch_waste_type_widget",
+        )
+    st.session_state.batch_waste_type = waste_type
+
+    selection_valid = (
+        bool(region)
+        and bool(waste_type)
+        and sites_config.is_valid_selection(region, site or "")
+    )
+
+    missing = []
+    if not region:
+        missing.append("מרחב")
+    elif has_sites and not site:
+        missing.append("אתר / יחידה")
+    if not waste_type:
+        missing.append("סוג פסולת")
+
+    if not selection_valid:
+        st.warning(
+            "יש להשלים את שיוך האצווה לפני העלאת קבצים - חסר: "
+            + ", ".join(missing)
+            + ".",
+            icon=":material/warning:",
+        )
+    else:
+        st.success(
+            "שיוך האצווה: **"
+            + region
+            + ("** · **" + site + "**" if site else "** (ללא אתר משני)")
+            + " · **"
+            + waste_type
+            + "**",
+            icon=":material/check_circle:",
+        )
+
+    st.divider()
+
     # Purely decorative - this Streamlit version's file_uploader dropzone has
     # no illustrative icon of its own (confirmed against the installed
     # version's source), just text + a small "Browse files" button; this
@@ -533,6 +660,7 @@ with st.container(key="upload_card"):
     allowed_types = sorted(ext.lstrip(".") for ext in config.SUPPORTED_EXTENSIONS | _MANUAL_EXCEL_EXTENSIONS)
     uploaded_files = st.file_uploader(
         "גררו לכאן קובצי תעודות, או לחצו לבחירה (כולל קובצי Excel ממולאים ידנית)",
+        disabled=not selection_valid,
         type=allowed_types,
         accept_multiple_files=True,
         help=f"סוגי קבצים נתמכים: {', '.join(allowed_types)}. קובץ xlsx נקרא ישירות "
@@ -547,10 +675,23 @@ with st.container(key="upload_card"):
         "עבד תעודות",
         icon=":material/play_arrow:",
         type="primary",
-        disabled=not uploaded_files,
+        disabled=not uploaded_files or not selection_valid,
+        help=None if selection_valid else "יש להשלים את שיוך האצווה למעלה (מרחב, אתר, סוג פסולת).",
     )
 
 if process_clicked:
+    # Captured once for the whole batch, from the selection card above - the
+    # only source for the מרחב/אתר/סוג-פסולת columns now (see
+    # app/pipeline.py's apply_batch_selection). Manual-Excel rows are
+    # deliberately NOT given this: those come from a human-filled sheet that
+    # already carries its own values, and overwriting them would discard real
+    # typed data (app/excel_input.py's whole premise).
+    batch_selection = BatchSelection(
+        region=st.session_state.batch_region or "",
+        site=st.session_state.batch_site or "",
+        waste_type=st.session_state.batch_waste_type or "",
+    )
+
     # .xlsx uploads never touch the model at all (see app/excel_input.py) -
     # split them out first so an API-key check below only blocks the batch
     # when it actually needs Claude for something.
@@ -602,7 +743,12 @@ if process_clicked:
                     def on_progress(index, total, path):
                         status.update(label=f"מעבד ({index}/{total}): {path.name}")
 
-                    result = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
+                    result = process_files(
+                        tmp_paths,
+                        on_progress=on_progress,
+                        on_error=on_error,
+                        selection=batch_selection,
+                    )
                     new_records, new_skipped = result.records, result.skipped
                     new_weighing = list(result.weighing_certificates)
 
@@ -706,6 +852,9 @@ if st.session_state.just_completed and (st.session_state.records or st.session_s
         st.session_state.records = []
         st.session_state.skipped = []
         st.session_state.weighing_certificates = []
+        st.session_state.batch_region = None
+        st.session_state.batch_site = None
+        st.session_state.batch_waste_type = None
         st.session_state.baseline_records = []
         st.session_state.output_path = None
         st.session_state.active_project_name = None
