@@ -15,6 +15,7 @@ from typing import List, Optional
 
 from .derive import parse_date
 from .excel_writer import parse_quantity
+from .fields import DOCUMENT_TYPE_KMM_SUMMARY_REPORT
 
 # "תאריך קרוב" - a few days' slack, not exact-day-only, since the manual
 # entry and the later scan may honestly disagree slightly on which day a
@@ -40,6 +41,23 @@ def _is_manual_excel_record(record: dict) -> bool:
     previously-saved project file, with no extra bookkeeping.
     """
     return (record.get("source_file") or "").lower().endswith((".xlsx", ".xls"))
+
+
+def _is_kmm_record(record: dict) -> bool:
+    """ק.מ.מ summary-report rows are excluded from duplicate detection
+    entirely (per an explicit 2026-09-15 requirement).
+
+    Not an arbitrary exclusion: this check looks for the same shipment
+    reported twice through two different channels, and a consolidated monthly
+    report is a different kind of object - it reports a month's total per
+    station per material, not a shipment. Worse, its rows are *designed* to
+    look like each other: 53 of the 68 rows in the real reference file are
+    the same material at the same station in different months, and several
+    share a weight (115 ק"ג recurs constantly), so the date/site/waste_type/
+    quantity heuristic here would generate a blizzard of false "כפילות
+    אפשרית" notes.
+    """
+    return record.get("document_type") == DOCUMENT_TYPE_KMM_SUMMARY_REPORT
 
 
 def _quantities_close(a: Optional[float], b: Optional[float]) -> bool:
@@ -77,6 +95,8 @@ def flag_potential_duplicates(records: List[dict]) -> None:
     re-appends the same flag or drifts out of sync with a stale position.
     """
     for i, a in enumerate(records):
+        if _is_kmm_record(a):
+            continue
         a_is_manual = _is_manual_excel_record(a)
         a_date = parse_date(a.get("date"))
         a_site = (a.get("site") or "").strip().casefold()
@@ -86,6 +106,8 @@ def flag_potential_duplicates(records: List[dict]) -> None:
             continue
         for j in range(i + 1, len(records)):
             b = records[j]
+            if _is_kmm_record(b):
+                continue
             if _is_manual_excel_record(b) == a_is_manual:
                 continue  # only cross-origin pairs are this specific failure mode
             b_date = parse_date(b.get("date"))

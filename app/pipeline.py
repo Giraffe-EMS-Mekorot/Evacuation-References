@@ -18,10 +18,13 @@ from .excel_writer import parse_quantity, read_existing_records
 # ids with leading zeros stripped, anything else case-folded), and two
 # independent copies of that rule would drift.
 from .extractor import _normalize_reference, extract_certificate_pages
+from .kmm_report import looks_like_kmm_report, parse_kmm_report
 from .fields import (
     BATCH_SELECTION_KEYS,
+    REGIONS,
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_WEIGHING_CERTIFICATE,
+    DOCUMENT_TYPE_KMM_SUMMARY_REPORT,
     DOCUMENT_TYPE_OTHER,
     WEIGHING_MATCHED_KEY,
     WEIGHING_PAGE_NUMBER_KEY,
@@ -373,6 +376,47 @@ def apply_batch_selection(records: List[dict], selection: Optional[BatchSelectio
         record.update(values)
 
 
+def apply_kmm_selection(records: List[dict], selection: Optional[BatchSelection]) -> None:
+    """Applies the batch selection to ק.מ.מ report rows - **region only.**
+
+    Decided explicitly with the user (2026-09-15) after the conflict was
+    surfaced: a single batch selection cannot describe this document, because
+    one report legitimately spans many stations and more than one material
+    (16 stations across at least 4 different מרחבים, and both קרטון and
+    נייר לבן, in the real reference file). So for this document type the
+    document wins for `site` and `waste_type` - it prints both, per row,
+    machine-readably, which is the exact opposite of the situation that
+    motivated the selection in the first place (ordinary certificates do not
+    state them, so the model used to guess).
+
+    `region` is the one field of the three the report does not state per row,
+    so it comes from the selection - the user's explicit choice, accepted with
+    its known downside: the selected מרחב will be wrong for any station that
+    belongs to a different one.
+
+    To restore the "which rows can I trust" signal that choice gives up, a row
+    whose station name explicitly names a DIFFERENT מרחב than the selected one
+    gets a note saying so and is escalated to "בינונית". That contradicts
+    nothing - region is still always filled from the selection - it just
+    annotates the rows where the document disagrees, which is only possible
+    for the minority of station names that name a מרחב at all.
+    """
+    if selection is None or not records:
+        return
+    selected = (selection.region or "").strip()
+    for record in records:
+        record["region"] = selected
+        if not selected:
+            continue
+        station = record.get("site") or ""
+        named = [r for r in REGIONS if r and r in station]
+        if named and selected not in named:
+            note = f"שם התחנה מציין {named[0]} אך נבחר {selected} - בדוק שיוך מרחב"
+            if record.get("confidence") not in ("נמוכה", "בינונית"):
+                record["confidence"] = "בינונית"
+            _append_note(record, note)
+
+
 # Called as on_progress(index, total, path) right before each file is sent to
 # the model - lets a caller (CLI print, Streamlit status widget) show progress
 # without this module knowing anything about how it's displayed. Fires once
@@ -461,6 +505,13 @@ def process_files(
     carries that number. See that function's docstring for the
     many-to-many indexing and the duplicate-number handling.
 
+    A ק.מ.מ consolidated monthly summary report (detected by
+    kmm_report.looks_like_kmm_report) bypasses the model entirely and yields
+    MANY records from one file - see app/kmm_report.py. Such records also skip
+    NameNormalizer and the quantity-outlier check, and only the selection's
+    `region` is applied to them (apply_kmm_selection), since the report states
+    its own site and material per row.
+
     selection (2026-09-15): the מרחב/אתר-מקור/סוג-פסולת chosen for this whole
     batch, written onto every returned record by apply_batch_selection().
     Those three fields are not extracted from the documents at all any more,
@@ -493,6 +544,23 @@ def process_files(
     for index, path in enumerate(paths, start=1):
         if on_progress:
             on_progress(index, total, path)
+        # A ק.מ.מ summary report is parsed from the PDF's own text layer and
+        # never sent to the model (see app/kmm_report.py). Detected before
+        # extraction so a 68-row report costs zero API calls, and routed
+        # around the per-record checks below: every one of those exists to
+        # catch a VISION model's mistakes, and nothing here was read by one -
+        # the same reasoning app/excel_input.py applies to hand-typed rows.
+        if looks_like_kmm_report(path):
+            try:
+                kmm_records = parse_kmm_report(path)
+            except Exception as exc:
+                if on_error:
+                    on_error(path, exc)
+                kmm_records = [empty_record(path.name, str(exc))]
+            apply_kmm_selection(kmm_records, selection)
+            records.extend(kmm_records)
+            continue
+
         try:
             page_records = extract_certificate_pages(path, client=client, use_examples=use_examples)
         except Exception as exc:  # the whole file couldn't be opened/split at all

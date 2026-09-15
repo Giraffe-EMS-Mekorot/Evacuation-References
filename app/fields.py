@@ -67,6 +67,18 @@ UNCLASSIFIED_WASTE_TYPE = "לא מסווג/לא מזוהה"
 # records that reach excel_writer.py) - see app/pipeline.py.
 DOCUMENT_TYPE_CERTIFICATE = "תעודת פינוי"
 DOCUMENT_TYPE_OTHER = "לא תעודת פינוי"
+# A third document type (2026-09-15), and the only one NOT assigned by the
+# model: a ק.מ.מ consolidated monthly summary report. It is detected in code
+# from the PDF's own text layer and parsed deterministically by
+# app/kmm_report.py - never sent to the vision API at all - so it is
+# deliberately kept out of DOCUMENT_TYPES below, which is the closed list the
+# model is asked to choose from. A model that never sees this format should
+# not be offered it as an option.
+#
+# One such file becomes MANY rows (16 stations / 68 data rows in the real
+# reference file), unlike every other document type here, which yields one row
+# per page. See app/kmm_report.py and pipeline.process_files.
+DOCUMENT_TYPE_KMM_SUMMARY_REPORT = 'דו"ח סיכום חודשי (ק.מ.מ)'
 DOCUMENT_TYPES = [DOCUMENT_TYPE_CERTIFICATE, DOCUMENT_TYPE_OTHER]
 
 # A distinct, orthogonal classification from document_type above: whether
