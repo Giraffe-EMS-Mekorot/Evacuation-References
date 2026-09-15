@@ -160,6 +160,22 @@ WEIGHING_PAGE_NUMBER_KEY = "weighing_page_number"
 # orphan.
 WEIGHING_MATCHED_KEY = "_weighing_matched"
 
+# The רמת_ביטחון as the pipeline itself determined it, before any human edit
+# in streamlit_app.py's results table (2026-09-15).
+#
+# The main table's confidence column is editable on purpose - a reviewer
+# marking a row as checked is useful - but the "מעקב פנימי" sheet must keep
+# showing what the extraction concluded, per an explicit requirement: that
+# sheet is the audit trail of what the model/checks produced, and if an edit
+# rewrote it there would be no record left of why a row was ever flagged.
+#
+# Stamped once per record by pipeline.process_files() (after the batch-level
+# cross-checks, which legitimately change confidence, and before any edit can
+# happen) and by excel_input.read_manual_excel(). Underscore-prefixed, so it
+# never reaches a spreadsheet column - excel_writer.py only iterates keys it
+# knows about.
+EXTRACTED_CONFIDENCE_KEY = "_extracted_confidence"
+
 # The closed list of מרחבים, sourced from app/sites_config.py so the dropdown
 # the user picks from and everything downstream (excel_writer.py's summary
 # sheet, streamlit_app.py's results-table dropdown) can never disagree.

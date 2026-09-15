@@ -31,7 +31,7 @@ from typing import List
 
 from openpyxl import load_workbook
 
-from .fields import HEBREW_MONTHS, empty_record
+from .fields import EXTRACTED_CONFIDENCE_KEY, HEBREW_MONTHS, empty_record
 
 # Column-header aliases this reader recognizes, mapped to the record key
 # they fill. Supports several real-world header spellings for the same
@@ -173,5 +173,10 @@ def read_manual_excel(path: Path) -> List[dict]:
         record["notes"] = " | ".join(notes)
 
         record["source_file"] = path.name
+        # Freeze the confidence this reader assigned, so a later edit to the
+        # main table's confidence column can't rewrite the "מעקב פנימי"
+        # sheet's audit value - same contract pipeline.process_files applies
+        # to AI-extracted rows. See fields.EXTRACTED_CONFIDENCE_KEY.
+        record[EXTRACTED_CONFIDENCE_KEY] = record["confidence"]
         records.append(record)
     return records

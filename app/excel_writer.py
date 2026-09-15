@@ -12,6 +12,7 @@ from .fields import (
     CERT_ROLE_WEIGHING_CERTIFICATE,
     CONFIDENCE_LEVELS,
     DOCUMENT_TYPE_CERTIFICATE,
+    EXTRACTED_CONFIDENCE_KEY,
     LEGACY_REGION_TO_CURRENT,
     EXCEL_COLUMNS,
     HEBREW_MONTHS,
@@ -301,6 +302,24 @@ def write_records(
     wb.save(output_path)
 
 
+def _tracking_value(record: dict, key: str):
+    """One cell for the "מעקב פנימי" sheet.
+
+    `confidence` deliberately reads fields.EXTRACTED_CONFIDENCE_KEY rather
+    than the live value: the main table's confidence column is editable, and
+    this sheet is the audit trail of what extraction concluded, which an edit
+    must not rewrite (explicit requirement). Falls back to the live value for
+    a record that predates the frozen key - a row read back from an older
+    project file, say - since something is better than a blank audit column.
+    """
+    if key == "source_file":
+        return _source_file_display(record)
+    if key == "confidence":
+        frozen = record.get(EXTRACTED_CONFIDENCE_KEY)
+        return frozen if frozen else record.get("confidence", "")
+    return record.get(key, "")
+
+
 def _write_internal_tracking_sheet(
     wb: Workbook, records: List[dict], weighing_certificates: Sequence[dict] = ()
 ) -> None:
@@ -349,7 +368,7 @@ def _write_internal_tracking_sheet(
         cell.border = _THIN_BORDER
 
     for row_idx, record in enumerate(records, start=2):
-        ws.append([_source_file_display(record) if key == "source_file" else record.get(key, "") for key in keys])
+        ws.append([_tracking_value(record, key) for key in keys])
         for col_idx in range(1, len(keys) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.font = _DATA_FONT

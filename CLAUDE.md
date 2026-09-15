@@ -1166,6 +1166,126 @@ into `ג"ק`, because both placements are legitimate in Hebrew (`בע"מ` puts i
 before the last letter, `ק"ג` after the first). A small explicit map of known
 abbreviations is the safe fix if this ever matters.
 
+## The blanket RTL rule vs. st.data_editor: a silent display bug (2026-09-15)
+
+**Read this before touching `streamlit_app.py`'s CSS block.** It cost a real
+bug that shipped unnoticed through several changes, and the failure mode is
+one no test in this repo can catch.
+
+### What happened
+
+`streamlit_app.py` opens its stylesheet with a universal rule:
+
+```css
+.stApp, .stApp * { direction: rtl; }
+```
+
+`st.data_editor` (and `st.dataframe`) do **not** render cells as DOM text -
+they draw them on a `<canvas>` (glide-data-grid), doing their own text layout
+and measurement. When that canvas's container inherited `direction: rtl`, the
+grid clipped **every cell to its single rightmost character**:
+
+| column | displayed | actual value |
+|---|---|---|
+| כמות מדווחת | `0` | `115.00` |
+| מספר אסמכתא | `2` | `KM111062` |
+| מרחב | `מ` | `מרחב מרכז` |
+| אתר / מקור | `מ` | `מקורות חבל הירדן מטה אתר אשכול*-חודש` |
+| סוג הפסולת | `ק` | `קרטונים` |
+| רמת ביטחון | `ב` | `בינונית` |
+
+The rightmost character is the *first* letter of Hebrew text and the *last*
+digit of a number, which is why it looks like two different bugs at once.
+**The quantity column showed `0` on every single row.**
+
+### Why it survived so long
+
+The data was never wrong. `write_records()` exported full correct values, and
+the cell editor showed the full value the moment a cell was opened - only the
+collapsed on-screen cells were unreadable. So every functional check passed
+while the table was visibly broken.
+
+**Crucially, `AppTest` cannot detect this.** `at.dataframe[0].value` returns
+the DataFrame that was handed to the widget, which is correct by construction;
+the corruption happens in browser canvas rendering, downstream of anything
+AppTest observes. Nine passing suites said nothing. It was found only by
+rendering the page in a real browser and looking at it.
+
+### The fix, and why the obvious one doesn't work
+
+```css
+[data-testid="stDataFrame"], [data-testid="stDataFrame"] * { direction: ltr; }
+```
+
+Restoring `direction: ltr` on the grid container lets glide-data-grid lay out
+its own text again. Column order is unaffected - it comes from the DataFrame,
+not from CSS - and Hebrew inside cells still renders right-to-left, because
+the canvas applies per-string bidi itself.
+
+**`width="large"` is not the fix.** It was tried first: a 287px-wide column
+still showed one character. This is not a "text doesn't fit" problem, so
+column widths, font sizes and `column_order` are all dead ends.
+
+### How to keep it from coming back
+
+1. **Never let a universal `*` direction/writing-mode rule reach a
+   canvas-rendered widget.** If the blanket `.stApp *` rule is kept, the
+   `[data-testid="stDataFrame"]` exclusion must be kept with it. Deleting the
+   exclusion silently reintroduces the bug - there is no error, no exception,
+   and no failing test.
+2. **After any change to that CSS block, look at the rendered table**, not
+   just the test output. The check is ten seconds: run the app, process
+   anything, and confirm `כמות מדווחת` shows a full number rather than a
+   single digit. That column is the canary - a bare `0` where a weight
+   belongs means this regressed.
+3. **Screenshot-verify UI changes generally.** This repo's CSS is extensive
+   and mostly targets `data-testid` attributes; AppTest validates behavior and
+   values, never appearance. For a visual change, drive a real browser
+   (Playwright is installed) and read the image.
+
+## Editable results table (2026-09-15)
+
+`st.data_editor` was already the results table; this change made three
+closed-list columns behave like closed lists and locked down what must not be
+edited.
+
+- **`אתר / מקור` became a dropdown**, sourced from `sites_config` - the same
+  config the upload selection card uses, so the two cannot drift.
+- **Options go through `_selectbox_options()`, not the bare closed list.** A
+  strictly-closed list would blank two kinds of legitimate existing value the
+  moment the table renders: a free-text site on a row written before the
+  selection screen existed, and a ק.מ.מ report's station name (12 of the 16
+  in the real reference file are not members of `REGION_SITES`). The user
+  still cannot *type* a new value - only pick one - which is what "closed
+  list" means in the editor.
+- **`קובץ מקור` and `מצב` stay read-only.** `source_file` is provenance: it
+  carries the `(עמוד N)` page reference, the Excel hyperlink target, and
+  `duplicate_check._is_manual_excel_record`'s origin test (by extension).
+  There is also a second reason that is easy to miss - **a pandas Styler only
+  applies to non-editable columns in `st.data_editor`**, so unlocking
+  `קובץ מקור` would silently kill the red/yellow confidence row coloring,
+  which this file describes elsewhere as the main UX mechanism of the tool.
+  `מצב` is a symbol computed from confidence; editing it would mean nothing.
+- **`כמות מדווחת` stays a `TextColumn`, not a `NumberColumn`** - see the
+  2026-09-01 manual-Excel note above: a hand-typed quantity can be `כ-1.8`,
+  and `NumberColumn` rejects or blanks that.
+
+### The tracking sheet keeps the ORIGINAL confidence
+
+The main table's confidence column is editable (useful for marking a row as
+reviewed), but the "מעקב פנימי" sheet is the audit trail of what extraction
+concluded and must not be rewritten by an edit - an explicit requirement.
+Those two read the same `record["confidence"]`, so editing the table used to
+overwrite the audit value; verified, not assumed.
+
+`fields.EXTRACTED_CONFIDENCE_KEY` now freezes it. `pipeline.process_files()`
+stamps it once per record **after** the batch-level cross-checks (those
+legitimately downgrade a row, and that is part of what extraction concluded)
+and before any edit is possible; `excel_input.read_manual_excel()` stamps its
+own rows; `excel_writer._tracking_value()` reads the frozen value, falling
+back to the live one only for a record that predates the key. Underscore
+prefix, so it never reaches a spreadsheet column.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This

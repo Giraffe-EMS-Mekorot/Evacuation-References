@@ -21,6 +21,7 @@ from .extractor import _normalize_reference, extract_certificate_pages
 from .kmm_report import looks_like_kmm_report, parse_kmm_report
 from .fields import (
     BATCH_SELECTION_KEYS,
+    EXTRACTED_CONFIDENCE_KEY,
     REGIONS,
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_WEIGHING_CERTIFICATE,
@@ -612,6 +613,14 @@ def process_files(
     _cross_check_bill_of_lading_estimates(records)
     _flag_swapped_tare_net(records)
     _cross_check_weighing_certificates(records, weighing_certificates)
+    # Last thing before returning: freeze the confidence the pipeline arrived
+    # at, so the "מעקב פנימי" sheet can keep reporting it even after a
+    # reviewer edits the main table's own confidence column (see
+    # fields.EXTRACTED_CONFIDENCE_KEY). After the cross-checks above, because
+    # those legitimately downgrade a row and that IS part of what extraction
+    # concluded.
+    for record in records + list(weighing_certificates) + skipped:
+        record[EXTRACTED_CONFIDENCE_KEY] = record.get("confidence", "")
     return ProcessResult(
         records=records, skipped=skipped, weighing_certificates=weighing_certificates
     )

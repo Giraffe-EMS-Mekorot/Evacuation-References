@@ -187,6 +187,17 @@ st.set_page_config(
 # upgrade's internal class-name churn better than most alternatives would.
 st.html(f"""<style>
 .stApp, .stApp * {{ direction: rtl; }}
+/* The blanket rule above must NOT reach st.data_editor's grid. That grid
+   draws its cells on a canvas, and inheriting direction:rtl made it clip
+   every cell to its single rightmost character - "115.00" rendered as "0",
+   "KM111062" as "2", "מרחב מרכז" as "מ", "קרטונים" as "ק". The data was
+   always correct (the Excel export and the open cell editor both showed full
+   values); only the collapsed on-screen cells were unreadable, which is why
+   it survived this long unnoticed. Note it is NOT a width problem - an
+   explicit width="large" changes nothing. Restoring direction:ltr on the
+   grid container lets it lay out its own text again; column order is
+   unaffected (it comes from the DataFrame, not from CSS). */
+[data-testid="stDataFrame"], [data-testid="stDataFrame"] * {{ direction: ltr; }}
 
 .st-key-header_card {{
     position: relative;
@@ -1021,6 +1032,27 @@ else:
                 ),
                 "מרחב / יחידה ראשית": st.column_config.SelectboxColumn(
                     options=_selectbox_options(REGIONS, (r.get("region") for r in visible_records))
+                ),
+                # אתר/מקור became a dropdown 2026-09-15, now that it is a
+                # closed-list field chosen on the upload screen rather than
+                # free text read off a certificate (see app/sites_config.py).
+                # Options come from the SAME config the selection card uses,
+                # so the two can never drift.
+                #
+                # Fed through _selectbox_options() rather than the bare list
+                # on purpose - see that helper. A strictly-closed list would
+                # blank two kinds of legitimate existing value the moment
+                # this table renders: a free-text site on a row written
+                # before the selection screen existed, and a ק.מ.מ report's
+                # station name (12 of the 16 in the real reference file are
+                # not members of REGION_SITES - see app/kmm_report.py). The
+                # user still cannot TYPE a new value; they can only pick from
+                # the list, which is what "closed list in the editor" means
+                # here.
+                "יחידה / אתר מקור": st.column_config.SelectboxColumn(
+                    options=_selectbox_options(
+                        sites_config.ALL_SITE_NAMES, (r.get("site") for r in visible_records)
+                    )
                 ),
             },
         )
