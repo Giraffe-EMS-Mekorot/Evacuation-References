@@ -32,6 +32,7 @@ from .fields import (
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_COMPLETION,
     CERT_ROLE_WEIGHING,
+    CERT_ROLE_WEIGHING_CERTIFICATE,
     CONFIDENCE_LEVELS,
     DOCUMENT_TYPE_OTHER,
     FIELD_DEFS,
@@ -124,6 +125,22 @@ _SYSTEM_PROMPT = (
     "הכמות ואת יחידת המידה לשדה יחידת_מידה, בדיוק כפי שהייתם עושים אילו המספר "
     "הזה הופיע בטבלת השקילה עצמה. אם אין בתעודה שום הערכה טקסטואלית עם מספר - "
     "השאירו את שדה הכמות ריק (אל תמלאו 0). "
+    "תבנית רביעית ונפרדת: טופס 'תעודת שקילה' ריק-למחצה שממולא ביד, שמגיע "
+    "כמסמך נלווה לתעודת משלוח ממוחשבת. הסימן המכריע: טבלת השקילה בגוף "
+    "המסמך (נטו/טרה/מס' רכב/תאריך/שעה/משקל) אינה מכילה ערכים מודפסים - "
+    "התאים ריקים או ממולאים בכתב יד. סימנים תומכים באותו עמוד: מספר סידורי "
+    "מודפס בכותרת, לוגו/שם חברה, שורות ריקות למילוי ביד (המזמין/כתובת/מ-/ל-/"
+    "מכונית מס'), וחתימות ידניות. שימו לב היטב: הכותרת המודפסת עשויה לומר "
+    "'תעודת משלוח מס'' - זה לא משנה את הסיווג. מסמך שטבלת השקילה שלו ריקה "
+    "או ידנית הוא תעודת שקילה נלווית גם אם בכותרתו כתוב 'תעודת משלוח'. אם "
+    "לעומת זאת ערכי ברוטו/טרה/נטו מודפסים ומלאים - זו אינה התבנית הזו. "
+    "קבעו זאת לפי צורת העמוד הזה בלבד; אינכם צריכים לאמת שקיים מסמך תואם "
+    f"(ההצלבה נעשית בקוד). אם מזוהה מסמך כזה - סמנו ב-cert_role את הערך "
+    f"'{CERT_ROLE_WEIGHING_CERTIFICATE}', וחלצו ממנו אך ורק את המספר המודפס "
+    "בכותרת אל שדה מספר_תעודה. אל תחלצו ממסמך כזה שום שדה אחר - לא תאריך, "
+    "לא שם נהג, לא מספר רכב, לא משקל ולא אתר - גם אם הם קריאים בפועל; "
+    "השאירו את כולם ריקים. הנתונים לשורה נלקחים תמיד מתעודת המשלוח "
+    "הממוחשבת. "
     "בשדה רמת_ביטחון דווח את הערכתך לגבי איכות הקריאה של התעודה כולה. "
     "בשדה הערות כתוב הערה קצרה בלבד - עד 4-5 מילים, לא משפט מלא - שמציינת רק את "
     "הבעיה עצמה בתמציתיות, למשל: 'כתב יד לא קריא', 'שדה חסר בתעודה', 'מספר תעודה "
@@ -362,6 +379,62 @@ def _flag_bill_of_lading_estimate(record: dict) -> None:
         record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
+# Every field a CERT_ROLE_WEIGHING_CERTIFICATE page is allowed to contribute,
+# plus the bookkeeping keys that aren't extracted content. Everything else in
+# FIELD_DEFS is force-blanked by _strip_weighing_certificate below - see that
+# function's docstring for why this is an allow-list and not a "blank the
+# fields that looked wrong" heuristic.
+_WEIGHING_CERTIFICATE_KEPT_FIELDS = {
+    "document_type",
+    "cert_role",
+    "certificate_number",
+    "confidence",
+    "notes",
+}
+
+
+def _strip_weighing_certificate(record: dict) -> None:
+    """Reduces a page the model tagged CERT_ROLE_WEIGHING_CERTIFICATE (a
+    separate תעודת שקילה accompanying a computerized תעודת משלוח - see
+    fields.py's cert_role description) to the single field it's allowed to
+    contribute: its own printed header number.
+
+    Deliberately an allow-list (_WEIGHING_CERTIFICATE_KEPT_FIELDS), applied
+    unconditionally, rather than trusting the model to have left the rest
+    blank as the field description asks. Per spec, this document is NOT a
+    data source for anything except that number - not its date, not its
+    driver/vehicle, not its weights - even when those happen to be legible
+    on the page. The computerized תעודת משלוח is the only source for the
+    row's real data, so a plausible-but-unauthorized value read off this
+    page is worse than no value: it would compete with the real one.
+
+    None of the ordinary certificate checks run on such a record (see
+    _extract_page) - they'd all fire on a document that is blank by design.
+    A record reduced here never becomes a row of its own: pipeline.py routes
+    it out of ProcessResult.records entirely (see
+    _cross_check_weighing_certificates).
+    """
+    number = (record.get("certificate_number") or "").strip()
+    for name, *_ in FIELD_DEFS:
+        if name not in _WEIGHING_CERTIFICATE_KEPT_FIELDS:
+            record[name] = ""
+    record["year"], record["month"] = "", ""
+    record["certificate_number"] = number
+    # Shown as this page's id on the "מעקב פנימי" sheet when it ends up with
+    # no matching תעודת משלוח (see excel_writer._write_internal_tracking_sheet).
+    record["certificate_or_reference"] = number
+    if number:
+        note = "תעודת שקילה - חולץ מספר מודפס בלבד"
+    else:
+        # The one structural sign this classification depends on most (see
+        # fields.py) couldn't actually be read, so there is nothing to match
+        # this page against - always a manual-review item.
+        note = "תעודת שקילה ללא מספר מודפס קריא"
+        record["confidence"] = "נמוכה"
+    if note not in (record.get("notes") or ""):
+        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+
+
 def _append_container_note(record: dict) -> None:
     """Folds container_count/container_type into notes instead of leaving
     them as their own column - per spec, this pair of fields is meant to be
@@ -553,6 +626,14 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic, use_examples:
         # flag a "problem" that isn't one. app.pipeline.process_files routes
         # this into its own "skipped" list, never into the normal records.
         record["year"], record["month"] = "", ""
+    elif record.get("cert_role") == CERT_ROLE_WEIGHING_CERTIFICATE:
+        # A separate תעודת שקילה accompanying a computerized תעודת משלוח -
+        # contributes only its own printed header number, and never becomes
+        # a row of its own (see _strip_weighing_certificate and
+        # pipeline._cross_check_weighing_certificates). Skips every check
+        # below for the same reason DOCUMENT_TYPE_OTHER does: they'd all
+        # flag a document that this feature blanks on purpose.
+        _strip_weighing_certificate(record)
     else:
         _flag_out_of_list_values(record)
         _flag_unclassified_waste_type(record)

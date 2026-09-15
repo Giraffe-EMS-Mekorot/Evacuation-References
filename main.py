@@ -9,6 +9,7 @@ import sys
 
 from app import config
 from app.excel_writer import write_records
+from app.fields import WEIGHING_MATCHED_KEY
 from app.pipeline import process_files
 
 
@@ -43,15 +44,30 @@ def main() -> None:
     def on_error(path, exc):
         print(f"  שגיאה בעיבוד {path.name}: {exc}")
 
-    records, skipped = process_files(files, on_progress=on_progress, on_error=on_error)
+    result = process_files(files, on_progress=on_progress, on_error=on_error)
+    records, skipped = result.records, result.skipped
 
     if skipped:
         print(f"\n{len(skipped)} עמודים דולגו (לא זוהו כתעודות פינוי):")
         for item in skipped:
             print(f"  {item.get('source_file', '')}: {item.get('notes', '')}")
 
+    # Separate תעודת שקילה pages that matched no תעודת משלוח in this run -
+    # they get no row anywhere, so surface the count here (and in the
+    # 'מעקב פנימי' sheet write_records() builds from the same list below)
+    # rather than letting them disappear silently.
+    orphan_weighing = [
+        c for c in result.weighing_certificates if not c.get(WEIGHING_MATCHED_KEY)
+    ]
+    if orphan_weighing:
+        print()
+        print(f"{len(orphan_weighing)} תעודות שקילה ללא תעודת משלוח תואמת (נרשמו בגיליון 'מעקב פנימי'):")
+        for item in orphan_weighing:
+            number = item.get('certificate_number', '') or '(לא נקרא)'
+            print(f"  {item.get('source_file', '')}: מספר {number}")
+
     output_path = config.OUTPUT_DIR / config.OUTPUT_FILENAME
-    write_records(records, output_path)
+    write_records(records, output_path, weighing_certificates=result.weighing_certificates)
     print(f"\nנשמר: {output_path} ({len(records)} תעודות)")
 
 

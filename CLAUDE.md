@@ -559,6 +559,220 @@ system prompt/field-description additions don't regress ordinary extraction
 - it still returned `DOCUMENT_TYPE_CERTIFICATE` with `cert_role` correctly
 blank.
 
+## Weighing-certificate pairing (2026-09-15)
+
+A second, independent document-pairing mechanism, added alongside - not
+replacing - the 2026-08-30 adjacent-page ברוטו/טרה/נטו pair check. Read both
+sections before touching either; they are genuinely different features that
+happen to share the word "pair", and a document can legitimately participate
+in both at once.
+
+**The pattern:** a computerized תעודת משלוח arrives together with a separate,
+usually-handwritten תעודת שקילה for the same removal. The delivery note
+carries all the real data; the weighing certificate carries essentially
+nothing except a printed running number in its header, which the delivery
+note echoes in its own "אסמכתא" field.
+
+**Classification is structural, not "is there handwriting".** A fourth
+`cert_role` value, `CERT_ROLE_WEIGHING_CERTIFICATE` (fields.py), is
+model-assigned from three signs: a *printed* (not handwritten) running number
+in the header, a header company name that appears as "אתר קולט" on ordinary
+source documents, and a weighing table (משקל/שעה/תאריך/מס' רכב/טרה/נטו) that's
+mostly blank or hand-filled. Deliberately **not** keyed off the printed title:
+a document whose header misprints "תעודת משלוח מס'" is still classified here if
+its structure matches. Same per-page, model-driven, supplier-agnostic approach
+as the other three cert_role values.
+
+**Extraction is deliberately crippled for this role.**
+`extractor._strip_weighing_certificate()` force-blanks every FIELD_DEFS field
+except an allow-list (`_WEIGHING_CERTIFICATE_KEPT_FIELDS`:
+document_type/cert_role/certificate_number/confidence/notes) - applied
+unconditionally, *not* trusting the model to have obeyed the field
+description. Per spec this document is not a data source for anything but its
+own printed number: a plausible-but-unauthorized date/driver/vehicle read off
+it is worse than a blank, because it would compete with the delivery note's
+real value. None of the ordinary certificate checks run on such a record
+(same skip-path shape as DOCUMENT_TYPE_OTHER) - they would all fire on a
+document this feature blanks on purpose.
+
+**The matching is many-to-many by number identity, and lives in pipeline.py,
+not extractor.py.** `pipeline._cross_check_weighing_certificates()` runs once
+per `process_files()` batch, across every file in it - upload order, page
+order, and file boundaries are all irrelevant (contrast
+`extractor._detect_and_cross_check_pairs`, which is strictly same-PDF/
+adjacent-page). It builds **two** `{normalized_number: [records]}` indexes up
+front - one keyed on each weighing certificate's `certificate_number`, one on
+each delivery note's `reference_number` - so a batch with 50 delivery notes
+and 50 weighing certificates resolves every pair by key lookup rather than by
+scanning for a first match. Numbers compare through
+`extractor._normalize_reference` (deliberately imported rather than
+reimplemented, so the two cross-checks cannot drift on leading zeros/casing).
+
+A link is made **only when the number is unique on both sides**
+(`len(deliveries) == 1 and len(matches) == 1`). Four outcomes:
+- **Unique 1:1** - the "מספר אסמכתא" column (`certificate_or_reference`) is
+  rewritten to the number as read off the *weighing certificate itself*, and
+  that document's file/page are recorded on the delivery record
+  (`WEIGHING_SOURCE_FILE_KEY`/`WEIGHING_PAGE_NUMBER_KEY`) for the second
+  hyperlink.
+- **Delivery note has an אסמכתא, no weighing certificate carries it** - the
+  column is *cleared* and `_NO_WEIGHING_MATCH_NOTE` added, per spec. Note the
+  consequence: such a row no longer displays its own `certificate_number`
+  there, which is what the spec asked for.
+- **Number duplicated on either side** - no match is chosen (never "pick the
+  first": an arbitrary link silently attributes a weighing certificate to the
+  wrong shipment). Both sides get a note naming the counts, and confidence is
+  escalated to at least "בינונית" - the spec only asked for a note, but
+  without escalation the row stays uncolored and the note is invisible in the
+  red/yellow review scan this tool is built around.
+- **Weighing certificate matched nothing** - stays unmatched and is listed on
+  the "מעקב פנימי" sheet (below). It never gets a row.
+
+A delivery note with **no** `reference_number` at all is left completely
+alone - existing `certificate_or_reference` behavior is unchanged for it.
+
+**Why the two pairing mechanisms do not collide:** this one only ever writes
+`certificate_or_reference` and the two link keys - never `certificate_number`
+or `reference_number`, which are what `_cross_check_document_pair()` compares.
+So a page can be half of an adjacent ברוטו/טרה/נטו pair *and* be cross-matched
+to a separate תעודת שקילה, with neither check disturbing the other's inputs.
+Verified explicitly in the smoke test below.
+
+**`ProcessResult` gained a third field, `weighing_certificates`** - these
+records are kept out of `.records` entirely rather than tagged-and-filtered.
+That is what gives the "never a row of its own" guarantee for free on both the
+Excel main sheet *and* streamlit_app.py's results table, with no filtering
+code in either. Not `.skipped` either - those are irrelevant documents; these
+are real data. The two `records, skipped = process_files(...)` unpack sites
+(main.py, streamlit_app.py) had to become attribute access as a result; that
+is the entire extent of the streamlit_app.py change besides state plumbing -
+no UI was touched.
+
+**Two hyperlinks needs two cells.** Excel supports exactly one hyperlink per
+cell, so the spec's suggested single joined cell
+(`"a.pdf (עמוד 3) | b.pdf (עמוד 1)"`) could only ever link to one of the two
+files. `excel_writer.py` instead appends a trailing main-sheet column,
+"קובץ תעודת שקילה", carrying the weighing certificate's own link.
+`fields.WEIGHING_SOURCE_FILE_COLUMN` defines it **outside `EXCEL_COLUMNS` on
+purpose**: streamlit_app.py derives its editable table's columns from
+`EXCEL_COLUMNS`, so an ordinary entry there would have silently added a column
+to the UI too. Appended *after* `source_file`, so no existing column index
+shifts (`_write_summary_sheet`'s `_KEYS.index("source_file")` is unaffected),
+and `read_existing_records()` maps its header back explicitly - without that,
+re-extending a project file would silently drop the second link from every row
+already written to it.
+
+**Orphan weighing certificates go in their own block on "מעקב פנימי"**
+(`_write_orphan_weighing_section`), below a blank spacer row, with its own
+header - not as extra rows in the tracking table, because its columns are
+genuinely different (a printed number and nothing else) and because mixing it
+in would break that sheet's "row N here lines up with row N on the main sheet"
+property. The autofilter ref is captured *before* this block is appended, so
+it still covers the tracking table only. Only unmatched ones are listed: a
+matched certificate carries `WEIGHING_MATCHED_KEY` and is already represented
+by the second hyperlink on its delivery note's row.
+
+**Durability fix, same day: orphans used to be erased on project reuse.**
+`write_records()` rebuilds "מעקב פנימי" from scratch on every write, and an
+unmatched weighing certificate has no main-sheet row for
+`read_existing_records()` to bring back - so reopening a project and
+processing one more batch silently deleted every previously-reported orphan
+from the file, defeating the whole point of that block.
+`excel_writer.read_existing_weighing_certificates()` now parses the orphan
+block back (keyed off `_ORPHAN_WEIGHING_TITLE`, reading until the first blank
+row), and streamlit_app.py seeds
+`st.session_state.weighing_certificates` from it on the project-reuse path,
+right next to the existing `read_existing_records()` call.
+`_write_orphan_weighing_section()` is now deduplicated by
+`(source_file, page_number, certificate_number)`, since the same certificate
+can legitimately arrive both from the reloaded sheet and from a re-upload.
+Recovered orphans are deliberately **not** re-matched against a later batch's
+delivery notes - matching stays batch-scoped per spec; this only stops the
+sheet from losing them. main.py needs no equivalent: the CLI has no
+history-preserving path at all (it rewrites the file from that run's records).
+
+**The first live run failed, and why it's worth reading.** Run against two
+real documents (`input/תעודת_משלוח_102050.png`,
+`input/תעודת_שקילה_70483.png` - note the filenames are swapped relative to
+their contents; the file named "משלוח" holds the weighing certificate and
+vice versa), `cert_role` came back **blank** on a textbook-matching weighing
+certificate, so it got its own main-sheet row and nothing cross-matched.
+
+Root cause: the original field description listed as one of its three signs
+"the header company name appears as אתר קולט on ordinary source documents" -
+information the model **cannot have from a single page**. This is the exact
+failure mode this file already records for `CERT_ROLE_WEIGHING` on
+2026-08-30, reintroduced for the same reason: a classification criterion that
+silently requires cross-document knowledge makes the model default to blank
+rather than guess. **When adding a cert_role value, every sign must be
+judgeable from the page in front of the model, and the description must say
+outright that confirming a matching document exists is not its job.**
+
+The rewrite leads with the one decisive, page-local discriminator - **the
+weighing table carries no printed values** (נטו/טרה/מס' רכב/תאריך/שעה/משקל
+cells empty or handwritten), which is precisely what separates this from
+`CERT_ROLE_WEIGHING`, whose ברוטו/טרה/נטו table is computer-printed and full -
+then supporting page-local signs (printed serial in the header, blank
+fill-in-by-hand lines, handwritten signatures), then explicit contrasts
+against `CERT_ROLE_WEIGHING` and `CERT_ROLE_COMPLETION`. It also warns
+explicitly that **the printed title on this real document misprints
+"תעודת משלוח מס'"** while being a weighing certificate. After the rewrite the
+same two documents classified correctly on the first try.
+
+**Live run result (2026-09-15, `claude-sonnet-5`, 2 vision calls):** weighing
+certificate correctly tagged with only its printed number `70483` extracted
+and every other field verifiably stripped (date/driver/vehicle were all
+legible on the page and none survived); one main-sheet row, not two; its
+"מספר אסמכתא" column showing `70483` - the number off the weighing
+certificate, not the delivery note's own `102050`; and two separate,
+differently-targeted hyperlinks in "קובץ מקור" / "קובץ תעודת שקילה". The
+weighing certificate was deliberately processed **first** in the batch, ahead
+of the delivery note it matches, confirming order independence on real data.
+Incidentally a good coexistence demonstration: the delivery note itself came
+back tagged `CERT_ROLE_WEIGHING` (it genuinely is a computerized weighing
+slip), which changed nothing - no adjacent COMPLETION page existed, so that
+check simply didn't fire, while the new cross-match did.
+
+**Pre-existing bug this run surfaced, NOT caused by this feature and not
+fixed here:** on the delivery note, `quantity` came back `21500`, which is
+the **טרה**, not the נטו (`41,260`). `gross_weight`/`tare_weight` came back
+`62,760`/`41,260` - i.e. נטו was read into the tare field. The three boxes on
+that document read `טרה: 21,500 | ברוטו: 62,760 | נטו: 41,260` left-to-right,
+so this looks like RTL box-order confusion on this specific layout.
+`_flag_gross_tare_mismatch()` cannot catch it: 62760 − 41260 = 21500 exactly
+matches the reported quantity, so the arithmetic is self-consistent while
+טרה and נטו are swapped. Reproduced identically on the run *before* any
+prompt change in this session, so it predates this work. Fixing it means
+touching the `quantity`/gross/tare field descriptions, which this file
+already flags as the most incident-prone prompt surface in the project -
+worth its own change with its own verification, not a drive-by edit.
+
+**Testing done (2026-09-15):** ~60 fabricated-record pure-function checks -
+the field-stripping allow-list, all four matching outcomes, duplicate numbers
+on *each* side independently, order independence (weighing certificate listed
+first), empty-batch no-op, coexistence with the adjacent-page pair check -
+plus a `write_records()` run asserting the two hyperlinks exist, differ, and
+target the right files, that an ordinary row's extra cell stays empty with no
+stray link, that the orphan section lists the unmatched ones and not the
+matched one, and a `read_existing_records()` -> `write_records()` round-trip
+proving the second link survives re-extension. Plus a
+`streamlit.testing.v1.AppTest` run (real `.streamlit/secrets.toml`
+`APP_PASSWORD` through the `st.form` gate - note `at.session_state` has no
+`.get()`, use `in`/`[]`, and an unauthenticated run renders *nothing*, so
+assert the gate passed or every later assertion is vacuous) confirming the
+results table renders with exactly the delivery rows, the weighing certificate
+absent, and no new UI column. **Verified live** against the two real documents
+described above (two `claude-sonnet-5` vision calls), after the first attempt
+failed and the field description was rewritten - see that discussion above
+before touching the cert_role wording again.
+
+**Heredoc gotcha, for whoever edits these files next:** patching via
+`python - <<'PY'` through the Bash tool in this environment is not literal -
+a `\n` in the script source collapses to a real newline (so a match string
+anchoring on `print(f"\nנשמר: ...")` in main.py silently fails to match), and
+an apostrophe inside the body can break shell parsing outright. Write the
+patch script to a file and run that instead.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This

@@ -30,7 +30,13 @@ import streamlit as st
 from app import config
 from app.duplicate_check import flag_potential_duplicates
 from app.excel_input import read_manual_excel
-from app.excel_writer import parse_quantity, read_existing_records, sort_by_confidence, write_records
+from app.excel_writer import (
+    parse_quantity,
+    read_existing_records,
+    read_existing_weighing_certificates,
+    sort_by_confidence,
+    write_records,
+)
 from app.fields import (
     CONFIDENCE_LEVELS,
     EXCEL_COLUMNS,
@@ -456,6 +462,15 @@ if "skipped" not in st.session_state:
     # same PDF). Shown in its own section below, never mixed into `records`
     # or written to the project's Excel file - see app/pipeline.py.
     st.session_state.skipped = []
+if "weighing_certificates" not in st.session_state:
+    # Separate תעודת שקילה pages (fields.CERT_ROLE_WEIGHING_CERTIFICATE) from
+    # this session's batches. Never rows of their own - and therefore
+    # deliberately NOT in `records`, which is what keeps them out of the
+    # results table below with no filtering there at all. Held in state only
+    # so every later write_records() call (e.g. after an inline edit) can
+    # keep reporting the unmatched ones on the "מעקב פנימי" sheet instead of
+    # losing them after the first write. See app/pipeline.py.
+    st.session_state.weighing_certificates = []
 if "baseline_records" not in st.session_state:
     st.session_state.baseline_records = []
 if "output_path" not in st.session_state:
@@ -558,13 +573,22 @@ if process_clicked:
             st.session_state.active_project_name = chosen_name
             st.session_state.output_path = _build_output_path(chosen_name)
             st.session_state.baseline_records = read_existing_records(st.session_state.output_path)
+            # Orphan תעודות שקילה already recorded on this project's
+            # 'מעקב פנימי' sheet have no main-sheet row, so the line
+            # above can't recover them - and write_records() rebuilds
+            # that sheet from scratch on every write. Without this,
+            # reopening a project and processing one more batch erased
+            # every previously-reported orphan from the file.
+            st.session_state.weighing_certificates = read_existing_weighing_certificates(
+                st.session_state.output_path
+            )
 
         errors = []
 
         def on_error(path, exc):
             errors.append((path.name, str(exc)))
 
-        new_records, new_skipped, manual_records = [], [], []
+        new_records, new_skipped, manual_records, new_weighing = [], [], [], []
 
         with st.status(f"מעבד {len(uploaded_files)} קבצים...", expanded=True) as status:
             if vision_uploads:
@@ -578,7 +602,9 @@ if process_clicked:
                     def on_progress(index, total, path):
                         status.update(label=f"מעבד ({index}/{total}): {path.name}")
 
-                    new_records, new_skipped = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
+                    result = process_files(tmp_paths, on_progress=on_progress, on_error=on_error)
+                    new_records, new_skipped = result.records, result.skipped
+                    new_weighing = list(result.weighing_certificates)
 
                 # process_files() always returns "quantity" as a raw string
                 # (like every other extracted field); the numeric column
@@ -620,6 +646,7 @@ if process_clicked:
             all_new_records = new_records + manual_records
             st.session_state.records.extend(all_new_records)
             st.session_state.skipped.extend(new_skipped)
+            st.session_state.weighing_certificates.extend(new_weighing)
             # Keep the in-memory order matching what write_records() below is
             # about to produce on disk (נמוכה first) - otherwise downloading
             # right after processing would reorder rows relative to what was
@@ -637,7 +664,11 @@ if process_clicked:
             # app/duplicate_check.py; safe to call on every write, including
             # ones with no new manual/extracted rows at all (a no-op then).
             flag_potential_duplicates(combined_records)
-            write_records(combined_records, st.session_state.output_path)
+            write_records(
+                combined_records,
+                st.session_state.output_path,
+                weighing_certificates=st.session_state.weighing_certificates,
+            )
             skip_note = f", {len(new_skipped)} דולגו כלא-תעודות" if new_skipped else ""
             manual_note = f", {len(manual_records)} מקובץ Excel ידני" if manual_records else ""
             status.update(
@@ -674,6 +705,7 @@ if st.session_state.just_completed and (st.session_state.records or st.session_s
         # never a fold-forward like the old single-shared-file design had.
         st.session_state.records = []
         st.session_state.skipped = []
+        st.session_state.weighing_certificates = []
         st.session_state.baseline_records = []
         st.session_state.output_path = None
         st.session_state.active_project_name = None
@@ -877,7 +909,11 @@ else:
     # an apparent match, so it must be re-evaluated on every write, not just
     # right after a batch is processed.
     flag_potential_duplicates(all_records)
-    write_records(all_records, st.session_state.output_path)
+    write_records(
+        all_records,
+        st.session_state.output_path,
+        weighing_certificates=st.session_state.weighing_certificates,
+    )
 
     with summary_slot:
         _render_stat_cards(

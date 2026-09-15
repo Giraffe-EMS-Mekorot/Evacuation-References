@@ -1,7 +1,7 @@
 """Writes extracted certificate records to the consolidated output Excel file."""
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -9,12 +9,19 @@ from openpyxl.utils import get_column_letter
 
 from . import config
 from .fields import (
+    CERT_ROLE_WEIGHING_CERTIFICATE,
     CONFIDENCE_LEVELS,
+    DOCUMENT_TYPE_CERTIFICATE,
     EXCEL_COLUMNS,
     HEBREW_MONTHS,
     INTERNAL_TRACKING_SHEET_COLUMNS,
     REGIONS,
     WASTE_TYPES,
+    WEIGHING_MATCHED_KEY,
+    WEIGHING_PAGE_NUMBER_KEY,
+    WEIGHING_SOURCE_FILE_COLUMN,
+    WEIGHING_SOURCE_FILE_KEY,
+    empty_record,
 )
 
 _MAIN_SHEET_NAME = "ריכוז תעודות"
@@ -77,6 +84,13 @@ _LEGACY_HEADER_ALIASES = {
 
 _KEYS = [key for key, _label in EXCEL_COLUMNS]
 _HEADERS = [label for _key, label in EXCEL_COLUMNS]
+
+# The trailing main-sheet column holding the second hyperlink of a
+# cross-matched row (see fields.WEIGHING_SOURCE_FILE_COLUMN for why it lives
+# there and not in EXCEL_COLUMNS). Appended after _KEYS, so every existing
+# column index - including _write_summary_sheet()'s
+# _KEYS.index("source_file") - is unaffected.
+_WEIGHING_SOURCE_KEY, _WEIGHING_SOURCE_HEADER = WEIGHING_SOURCE_FILE_COLUMN
 _INTERNAL_KEYS = [key for key, _label in INTERNAL_TRACKING_SHEET_COLUMNS]
 
 # Matches the "(עמוד N)" suffix _source_file_display() appends to a
@@ -151,6 +165,20 @@ def _source_file_display(record: dict) -> str:
     return filename
 
 
+def _weighing_source_file_display(record: dict) -> str:
+    """Same "filename (עמוד N)" composition as _source_file_display(), but for
+    the *other* document of a cross-matched pair - the separate תעודת שקילה
+    whose file/page pipeline._cross_check_weighing_certificates recorded on
+    this record (fields.WEIGHING_SOURCE_FILE_KEY / WEIGHING_PAGE_NUMBER_KEY).
+    Empty string for every ordinary row, which is the overwhelming majority.
+    """
+    filename = record.get(WEIGHING_SOURCE_FILE_KEY, "") or ""
+    page_number = record.get(WEIGHING_PAGE_NUMBER_KEY)
+    if filename and page_number:
+        return f"{filename} (עמוד {page_number})"
+    return filename
+
+
 def _split_source_file_display(text: str) -> Tuple[str, str]:
     """Inverse of _source_file_display() - splits a "קובץ מקור" cell's text
     back into (filename, page_number), for read_existing_records() to
@@ -165,7 +193,11 @@ def _split_source_file_display(text: str) -> Tuple[str, str]:
     return text or "", ""
 
 
-def write_records(records: List[dict], output_path: Path) -> None:
+def write_records(
+    records: List[dict],
+    output_path: Path,
+    weighing_certificates: Optional[Sequence[dict]] = None,
+) -> None:
     """Writes one row per record plus a live-formula "סיכום" sheet, overwriting
     any existing file.
 
@@ -185,6 +217,22 @@ def write_records(records: List[dict], output_path: Path) -> None:
     file, unaffected. Rows are written in confidence order (נמוכה first) -
     see sort_by_confidence() - so the ones needing review are at the top,
     not scattered through the sheet in whatever order they were processed.
+
+    One extra trailing column, "קובץ תעודת שקילה", is written after
+    "קובץ מקור" for the rows that were cross-matched to a separate
+    תעודת שקילה page (see pipeline._cross_check_weighing_certificates): it
+    carries that other document's own hyperlink, so such a row has two
+    independently-clickable links rather than one joined string that can
+    only link to one of the two files (Excel allows exactly one hyperlink
+    per cell). It's deliberately not a fields.EXCEL_COLUMNS entry - see
+    fields.WEIGHING_SOURCE_FILE_COLUMN.
+
+    weighing_certificates: the batch's CERT_ROLE_WEIGHING_CERTIFICATE pages
+    (ProcessResult.weighing_certificates). These never get a row on the main
+    sheet; the ones that found no matching תעודת משלוח are listed in their
+    own section of the "מעקב פנימי" sheet so an orphan weighing certificate
+    doesn't disappear without a trace. Optional, so main.py-era callers and
+    any test calling write_records(records, path) keep working unchanged.
     """
     records = sort_by_confidence(records)
 
@@ -193,7 +241,7 @@ def write_records(records: List[dict], output_path: Path) -> None:
     ws.title = _MAIN_SHEET_NAME
     ws.sheet_view.rightToLeft = True
 
-    ws.append(_HEADERS)
+    ws.append(_HEADERS + [_WEIGHING_SOURCE_HEADER])
     ws.row_dimensions[1].height = 26
     for cell in ws[1]:
         cell.font = _HEADER_FONT
@@ -212,21 +260,22 @@ def write_records(records: List[dict], output_path: Path) -> None:
                 row_values.append(_source_file_display(record))
             else:
                 row_values.append(raw)
+        row_values.append(_weighing_source_file_display(record))
         ws.append(row_values)
 
         confidence_fill = _FILL_BY_CONFIDENCE.get(record.get("confidence", ""))
         band_fill = _BANDED_ROW_FILL if row_idx % 2 == 1 else None
         row_fill = confidence_fill or band_fill  # confidence coloring always wins
 
-        for col_idx, key in enumerate(_KEYS, start=1):
+        for col_idx, key in enumerate(_KEYS + [_WEIGHING_SOURCE_KEY], start=1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.border = _THIN_BORDER
             if row_fill:
                 cell.fill = row_fill
-            if key == "source_file":
+            if key in ("source_file", _WEIGHING_SOURCE_KEY):
                 cell.font = _HYPERLINK_FONT
                 cell.alignment = Alignment(horizontal="right")
-                filename = record.get("source_file", "")
+                filename = record.get(key, "") or ""
                 if filename:
                     cell.hyperlink = (config.INPUT_DIR / filename).resolve().as_uri()
             else:
@@ -244,14 +293,16 @@ def write_records(records: List[dict], output_path: Path) -> None:
     ws.freeze_panes = "B2"
     ws.auto_filter.ref = ws.dimensions
 
-    _write_internal_tracking_sheet(wb, records)
+    _write_internal_tracking_sheet(wb, records, weighing_certificates or [])
     _write_summary_sheet(wb)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
 
 
-def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
+def _write_internal_tracking_sheet(
+    wb: Workbook, records: List[dict], weighing_certificates: Sequence[dict] = ()
+) -> None:
     """Writes the "מעקב פנימי" sheet: fields collected from the certificate
     but not shown on the main sheet by default (vehicle/driver/entry-exit-
     time/gross-tare-weight - see fields.INTERNAL_TRACKING_FIELDS), plus a
@@ -268,6 +319,19 @@ def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
     run - but unlike the סיכום sheet below, this one is plain extracted
     data, not a live formula, so a later manual edit on the main sheet won't
     be reflected here without rerunning the pipeline.
+
+    Below that table, a separate labelled section lists any תעודת שקילה page
+    from the batch that matched no תעודת משלוח (see
+    pipeline._cross_check_weighing_certificates) - per spec, such a page
+    gets no row of its own anywhere, but must not vanish silently either.
+    Written as its own block with its own header rather than as extra rows
+    in the table above, because its columns are genuinely different (it has
+    a printed number and nothing else - no site, no weights) and because
+    mixing it in would break the "row N here lines up with row N on the main
+    sheet" property described above. Only the UNMATCHED ones are listed: a
+    weighing certificate that was consumed by a 1:1 match carries
+    fields.WEIGHING_MATCHED_KEY and is already represented by the second
+    hyperlink on its delivery certificate's main-sheet row.
     """
     ws = wb.create_sheet(_INTERNAL_SHEET_NAME)
     ws.sheet_view.rightToLeft = True
@@ -293,12 +357,155 @@ def _write_internal_tracking_sheet(wb: Workbook, records: List[dict]) -> None:
             if row_idx % 2 == 1:
                 cell.fill = _BANDED_ROW_FILL
 
+    # Captured before the orphan section below extends the used range - the
+    # autofilter belongs to the tracking table only, not to a second block
+    # with different columns underneath it.
+    table_ref = ws.dimensions
+
+    _write_orphan_weighing_section(ws, weighing_certificates)
+
     for col_idx, column_cells in enumerate(ws.columns, start=1):
         longest = max((len(str(c.value)) if c.value is not None else 0) for c in column_cells)
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max(longest + 2, 10), 30)
 
     ws.freeze_panes = "B2"
-    ws.auto_filter.ref = ws.dimensions
+    ws.auto_filter.ref = table_ref
+
+
+_ORPHAN_WEIGHING_TITLE = "תעודות שקילה ללא תעודת משלוח תואמת באצווה"
+_ORPHAN_WEIGHING_HEADERS = ["קובץ מקור", "מספר תעודת שקילה", "הערות"]
+
+
+def _write_orphan_weighing_section(ws, weighing_certificates: Sequence[dict]) -> None:
+    """Appends the "unmatched תעודת שקילה" block to the bottom of the
+    "מעקב פנימי" sheet - see _write_internal_tracking_sheet()'s docstring for
+    why this is a separate block rather than extra rows in the table above.
+
+    A no-op when the batch had no weighing certificates, or when every one
+    of them found its delivery certificate, so an ordinary run's tracking
+    sheet looks exactly as it did before this feature existed. The source
+    file cell is a real hyperlink, same as everywhere else, so a reviewer
+    can open the orphan page and decide what to do with it.
+    """
+    # Deduplicated by (file, page, number): now that
+    # read_existing_weighing_certificates() feeds previously-recorded orphans
+    # back in alongside a fresh batch's own, the same certificate can legitimately
+    # reach this function twice (re-uploaded into a reopened project). Writing it
+    # twice would make the sheet look like two different orphan documents.
+    orphans = []
+    seen = set()
+    for cert in weighing_certificates:
+        if cert.get(WEIGHING_MATCHED_KEY):
+            continue
+        identity = (
+            cert.get("source_file", ""),
+            str(cert.get("page_number") or ""),
+            (cert.get("certificate_number") or "").strip(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        orphans.append(cert)
+    if not orphans:
+        return
+
+    ws.append([])  # one blank spacer row, so the two blocks read as separate
+    title_row = ws.max_row + 1
+    ws.cell(row=title_row, column=1, value=_ORPHAN_WEIGHING_TITLE).font = _SECTION_TITLE_FONT
+
+    header_row = title_row + 1
+    for col_idx, label in enumerate(_ORPHAN_WEIGHING_HEADERS, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=label)
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.fill = _HEADER_FILL
+        cell.border = _THIN_BORDER
+
+    for offset, cert in enumerate(orphans, start=1):
+        row_idx = header_row + offset
+        values = [
+            _source_file_display(cert),
+            cert.get("certificate_number", "") or "",
+            cert.get("notes", "") or "",
+        ]
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = _THIN_BORDER
+            cell.alignment = Alignment(horizontal="right")
+            if col_idx == 1:
+                cell.font = _HYPERLINK_FONT
+                filename = cert.get("source_file", "") or ""
+                if filename:
+                    cell.hyperlink = (config.INPUT_DIR / filename).resolve().as_uri()
+            else:
+                cell.font = _DATA_FONT
+
+
+def read_existing_weighing_certificates(path: Path) -> List[dict]:
+    """Reads the "מעקב פנימי" sheet's orphan-weighing-certificate block back
+    into records - the inverse of _write_orphan_weighing_section(), and the
+    counterpart to read_existing_records() for the one kind of record that
+    has no main-sheet row to be recovered from.
+
+    Without this, reopening a project and processing another batch silently
+    dropped every previously-recorded orphan from the sheet: write_records()
+    rebuilds "מעקב פנימי" from scratch on every write, and a weighing
+    certificate that never matched a תעודת משלוח has no main-sheet row for
+    read_existing_records() to bring back. The orphan block was therefore
+    written once and erased by the next write - exactly the silent data loss
+    that block exists to prevent.
+
+    Same "missing/unreadable file is an empty starting point, never an error"
+    policy as read_existing_records(). Returns records shaped like the ones
+    extractor._strip_weighing_certificate() produces, deliberately WITHOUT
+    fields.WEIGHING_MATCHED_KEY - they were orphans when written and nothing
+    here has changed that.
+
+    Note these recovered records are not re-matched against a later batch's
+    delivery certificates: per spec, matching is scoped to one batch
+    ("באותה אצווה"), so pipeline._cross_check_weighing_certificates() only
+    ever sees the certificates from the batch it was called for. This
+    function's job is purely to stop the sheet from losing them.
+    """
+    if not path.is_file():
+        return []
+    try:
+        wb = load_workbook(path, data_only=True)
+    except Exception:
+        return []
+    if _INTERNAL_SHEET_NAME not in wb.sheetnames:
+        return []
+
+    ws = wb[_INTERNAL_SHEET_NAME]
+    title_row = None
+    for row_idx in range(1, ws.max_row + 1):
+        value = ws.cell(row=row_idx, column=1).value
+        if value and str(value).strip() == _ORPHAN_WEIGHING_TITLE:
+            title_row = row_idx
+            break
+    if title_row is None:
+        return []
+
+    records = []
+    # +1 is the block's own header row; data starts two rows below the title.
+    for row_idx in range(title_row + 2, ws.max_row + 1):
+        source_cell = ws.cell(row=row_idx, column=1).value
+        if source_cell in (None, ""):
+            break  # end of the block
+        filename, page_number = _split_source_file_display(str(source_cell))
+        number = ws.cell(row=row_idx, column=2).value
+        number = "" if number is None else str(number).strip()
+        notes = ws.cell(row=row_idx, column=3).value
+        record = empty_record(filename)
+        record["document_type"] = DOCUMENT_TYPE_CERTIFICATE
+        record["cert_role"] = CERT_ROLE_WEIGHING_CERTIFICATE
+        record["certificate_number"] = number
+        record["certificate_or_reference"] = number
+        record["notes"] = "" if notes is None else str(notes)
+        if page_number:
+            record["page_number"] = page_number
+        records.append(record)
+    return records
 
 
 def read_existing_records(path: Path) -> List[dict]:
@@ -337,7 +544,13 @@ def read_existing_records(path: Path) -> List[dict]:
 
     ws = wb[_MAIN_SHEET_NAME]
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    # The trailing "קובץ תעודת שקילה" column isn't in EXCEL_COLUMNS (see
+    # fields.WEIGHING_SOURCE_FILE_COLUMN), so it has to be added to the
+    # header->key map explicitly; without this, re-extending a project file
+    # would silently drop the second hyperlink from every cross-matched row
+    # that was already written to it.
     label_to_key = dict(zip(_HEADERS, _KEYS))
+    label_to_key[_WEIGHING_SOURCE_HEADER] = _WEIGHING_SOURCE_KEY
     col_keys = [label_to_key.get(label, _LEGACY_HEADER_ALIASES.get(label)) for label in header_row]
 
     records = []
@@ -361,6 +574,14 @@ def read_existing_records(path: Path) -> List[dict]:
                 record["source_file"] = filename
                 if page_number:
                     record["page_number"] = page_number
+                continue
+            if key == _WEIGHING_SOURCE_KEY:
+                # Same "(עמוד N)" round-trip as source_file just above, for
+                # the cross-matched תעודת שקילה's own file/page.
+                filename, page_number = _split_source_file_display(None if value is None else str(value))
+                record[_WEIGHING_SOURCE_KEY] = filename
+                if page_number:
+                    record[WEIGHING_PAGE_NUMBER_KEY] = page_number
                 continue
             record[key] = value if key == "quantity" and value is not None else ("" if value is None else str(value))
 

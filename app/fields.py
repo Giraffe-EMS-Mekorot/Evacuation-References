@@ -95,7 +95,56 @@ CERT_ROLE_COMPLETION = "אישור ביצוע עבודה/הטמנה"
 # in the same batch (by vehicle+site+nearby date, not a matching id - see
 # that function's docstring for why an id match can't be required here).
 CERT_ROLE_BILL_OF_LADING_ZERO = "שטר מטען (משקל/נפח אפס - הערכה טרם שקילה)"
-CERT_ROLES = [CERT_ROLE_WEIGHING, CERT_ROLE_COMPLETION, CERT_ROLE_BILL_OF_LADING_ZERO]
+# A fourth cert_role value (2026-09-15), again unrelated to the
+# WEIGHING/COMPLETION pair above: a half-empty, hand-filled "תעודת שקילה"
+# form that accompanies a computerized תעודת משלוח for the same removal.
+#
+# **The decisive sign is that the weighing table carries no printed values**
+# (נטו/טרה/מס' רכב/תאריך/שעה/משקל cells empty or handwritten). That is exactly
+# what separates it from CERT_ROLE_WEIGHING, whose ברוטו/טרה/נטו table IS
+# computer-printed and full - and it's page-local, which matters: a first
+# version of this description asked the model to notice that the header
+# company name "appears as אתר קולט on ordinary source documents", which is
+# knowledge it cannot have from one page. It returned cert_role blank on a
+# real, textbook-matching document (input/תעודת_משלוח_102050.png, live run
+# 2026-09-15) - the same failure mode CLAUDE.md records for CERT_ROLE_WEIGHING
+# on 2026-08-30, for the same root cause. Every sign is now judgeable from the
+# page in front of the model, and the description says outright that
+# confirming a matching document exists is not its job.
+#
+# Deliberately NOT keyed off the printed title text: the real document's
+# header misprints "תעודת משלוח מס'" while being a weighing certificate, so
+# the description warns about that case explicitly.
+#
+# The ONLY field extracted from a page tagged this way is its own printed
+# header number (certificate_number) - see extractor._strip_weighing_certificate
+# for the code that enforces that, and pipeline._cross_check_weighing_certificates
+# for the batch-level matching of that number against a תעודת משלוח's
+# reference_number. Such a page never becomes a row of its own on the main
+# sheet.
+CERT_ROLE_WEIGHING_CERTIFICATE = "תעודת שקילה נלווית (מספר מודפס בכותרת)"
+CERT_ROLES = [
+    CERT_ROLE_WEIGHING,
+    CERT_ROLE_COMPLETION,
+    CERT_ROLE_BILL_OF_LADING_ZERO,
+    CERT_ROLE_WEIGHING_CERTIFICATE,
+]
+
+# Record keys written by pipeline._cross_check_weighing_certificates onto a
+# תעודת משלוח record once it's been matched 1:1 with a separate
+# CERT_ROLE_WEIGHING_CERTIFICATE page in the same batch. They hold the
+# *other* document's file/page so excel_writer.py can render a second,
+# independently-clickable hyperlink next to the row's own "קובץ מקור" link
+# (see WEIGHING_SOURCE_FILE_COLUMN below). Named here rather than inline in
+# those two modules so the producer and the consumer can't drift.
+WEIGHING_SOURCE_FILE_KEY = "weighing_source_file"
+WEIGHING_PAGE_NUMBER_KEY = "weighing_page_number"
+# Set on a CERT_ROLE_WEIGHING_CERTIFICATE record itself (not on the תעודת
+# משלוח) once it has been consumed by a 1:1 match - excel_writer.py lists
+# only the UNmatched ones on the "מעקב פנימי" sheet, so a weighing
+# certificate that found its delivery certificate isn't also reported as an
+# orphan.
+WEIGHING_MATCHED_KEY = "_weighing_matched"
 
 REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
 
@@ -241,7 +290,35 @@ FIELD_DEFS = [
         "'0 טון') ולא ריק - זה לא אומר שהכמות באמת אפס. סמנו ערך זה כשמזוהה "
         "תבנית כזו, כדי שהכמות תיבדק כהערכה טקסטואלית חלופית ולא כ-0 (ראו "
         "הוראות שדה כמות). "
-        "אם אין לתעודה מבנה מובהק של אף אחד משלושת הדפוסים (המקרה הנפוץ ביותר) - "
+        f"תבנית רביעית, נפרדת ומובהקת: '{CERT_ROLE_WEIGHING_CERTIFICATE}' - "
+        "טופס 'תעודת שקילה' ריק-למחצה שממולא ביד, ומגיע כמסמך נלווה לתעודת "
+        "משלוח ממוחשבת. הסימן המכריע, וזה שצריך להכריע אצלך: **טבלת השקילה "
+        "בגוף המסמך (עמודות כמו נטו / טרה / מס' רכב / תאריך / שעה / משקל) "
+        "אינה מכילה ערכים מודפסים** - התאים בה ריקים לגמרי, או שיש בהם כתב "
+        "יד. סימנים תומכים, כולם נראים בעמוד הזה עצמו: מספר סידורי מודפס "
+        "בכותרת (בניגוד לשאר המסמך שממולא ביד); כותרת/לוגו של חברה (האתר "
+        "הקולט או המוביל); שורות ריקות למילוי ביד (המזמין, כתובת, מ-, ל-, "
+        "מכונית מס', שעת יציאה); וחתימות ידניות בתחתית. "
+        "אזהרת טעות נפוצה: **הכותרת המודפסת עשויה לומר 'תעודת משלוח מס''** - "
+        "אל תיתן לזה להטעות אותך. מסמך שטבלת השקילה שלו ריקה/כתובה ביד הוא "
+        f"'{CERT_ROLE_WEIGHING_CERTIFICATE}' גם כשכתוב בכותרתו 'תעודת משלוח'. "
+        "הקביעה היא לפי המבנה בפועל, לא לפי מה שהכותרת מצהירה. "
+        f"ההבדל מ-'{CERT_ROLE_WEIGHING}': שם טבלת ברוטו/טרה/נטו **מודפסת "
+        "ומלאה בערכים ממוחשבים**; כאן היא ריקה או ידנית. אם הערכים מודפסים - "
+        f"זה '{CERT_ROLE_WEIGHING}' (או תעודה רגילה), לא הערך הזה. "
+        f"ההבדל מ-'{CERT_ROLE_COMPLETION}': שם קיים שדה 'אסמכתא' נפרד המפנה "
+        "למספר תעודה של מסמך אחר; כאן המספר המודפס בכותרת הוא המספר של "
+        "המסמך הזה עצמו, ואין בו שדה אסמכתא. "
+        "קבע זאת לפי הצורה של העמוד הזה בלבד, ובלי קשר לשאלה אם קיים מסמך "
+        "אחר שמתאים לו - אינך צריך (ואינך יכול) לאמת שקיימת תעודת משלוח "
+        "תואמת, וההצלבה ביניהן נעשית בקוד בשלב נפרד. אם העמוד הזה לבדו מציג "
+        "את המבנה הזה - סמן את הערך, גם אם אין לך מושג אם יש לו זוג. "
+        f"כשאתה מסמן '{CERT_ROLE_WEIGHING_CERTIFICATE}' - חלץ מהמסמך הזה אך "
+        "ורק את המספר המודפס בכותרת, אל שדה מספר_תעודה. אל תנסה לחלץ ממנו "
+        "שום שדה אחר (תאריך, שם נהג, מספר רכב, משקל, אתר וכו') גם אם חלקם "
+        "קריאים בפועל - השאר את כולם ריקים. הנתונים לשורה בטבלה נלקחים תמיד "
+        "מתעודת המשלוח הממוחשבת, לא מכאן. "
+        "אם אין לתעודה מבנה מובהק של אף אחד מארבעת הדפוסים (המקרה הנפוץ ביותר) - "
         "השאר ריק.",
         "string",
     ),
@@ -385,6 +462,26 @@ EXCEL_COLUMNS = [
     ("notes", "הערות"),
     ("source_file", "קובץ מקור"),
 ]
+
+# A main-sheet column that is deliberately NOT part of EXCEL_COLUMNS above
+# (2026-09-15). It holds the second of the two hyperlinks a cross-matched row
+# gets - one to the תעודת משלוח page, one to the separate תעודת שקילה page
+# (see CERT_ROLE_WEIGHING_CERTIFICATE and
+# pipeline._cross_check_weighing_certificates). Two independently-clickable
+# links can't live in one cell: Excel supports exactly one hyperlink per
+# cell, so "file_a | file_b" as a single joined string can only ever link to
+# one of them.
+#
+# Kept out of EXCEL_COLUMNS on purpose, rather than added as an ordinary
+# entry: streamlit_app.py derives its editable results table's columns from
+# EXCEL_COLUMNS, so an entry here would silently add a column to that table
+# too - and this change was explicitly scoped to leave the UI alone.
+# excel_writer.py appends it as a trailing column on the Excel main sheet
+# only (after source_file, so no existing column index shifts - the summary
+# sheet's _KEYS.index("source_file") lookup is unaffected), and
+# read_existing_records() maps its header back explicitly so re-extending a
+# project file doesn't drop the link.
+WEIGHING_SOURCE_FILE_COLUMN = (WEIGHING_SOURCE_FILE_KEY, "קובץ תעודת שקילה")
 
 # Collected from every certificate (they're ordinary FIELD_DEFS entries) but
 # kept off the main table/sheet by default - see this module's docstring.
