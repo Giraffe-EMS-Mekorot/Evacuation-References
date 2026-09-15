@@ -976,6 +976,132 @@ Plus a real API run with a selection deliberately contradicting the document
 (מרחב צפון/גליל/פסולת בנין on an אוליצקי "עודפי עפר קידוח" certificate), and
 Playwright screenshots of the live app in each state.
 
+## ק.מ.מ consolidated monthly summary report (2026-09-15)
+
+A third document type, and the first one this project does **not** send to the
+model at all. `app/kmm_report.py` parses it deterministically from the PDF's
+own text layer.
+
+**Why not vision.** This report is a digitally generated PDF with a real text
+layer - no handwriting, no photograph, no OCR. Reading the text that is
+already in the file is faster, free, and *more* accurate than asking a vision
+model to look at a picture of it. `pypdfium2` was already a dependency
+(extractor.py uses it to rasterize pages), so this added no package.
+
+**One file becomes many rows.** Every other document type here yields one row
+per page; this one is structured customer-center -> station -> month ->
+material. The real reference file (`input/דוח כמויות מקורות 1-6.26.pdf`,
+2 pages) contains **16 stations and 68 data rows totalling 18,670 ק"ג**
+(קרטון 53 rows, נייר לבן 15, across 6 months). The report has no printed
+total, so those numbers were counted independently from the raw text layer
+before the parser existed and are now hard assertions in the test suite - a
+future regression that drops or duplicates a row fails loudly instead of
+quietly changing a sum.
+
+### The batch-selection conflict, and how it was resolved
+
+The per-batch selection screen (see the section above) sets one
+מרחב/אתר/סוג-פסולת for a whole upload. This document breaks that assumption
+three ways, and the third is the one that isn't obvious:
+
+1. 16 stations in one file.
+2. Two different materials in one file.
+3. **12 of the 16 station names are not members of the closed
+   `sites_config.REGION_SITES` list at all** (e.g. "מקורות ראש פינה",
+   "מקורות אתר ספיר"), and the stations span at least four different מרחבים.
+
+Resolved with the user: **for this document type the document wins for `site`
+and `waste_type`, and `region` comes from the selection.** The reasoning is
+that the selection exists because ordinary certificates *don't state* these
+fields, so the model used to guess them - while this report prints the station
+and material explicitly, per row, machine-readably. Applying the selection
+here would be following the mechanism against its own purpose and discarding
+the only reliable per-row identifying data in the file.
+
+`region` is the one field the report doesn't state per row, so it takes the
+selection - the user's explicit choice, accepted with its known downside (the
+selected מרחב is wrong for any station belonging to a different one). To
+restore the "which rows can I trust" signal that gives up,
+`pipeline.apply_kmm_selection()` notes and escalates to "בינונית" any row
+whose station name explicitly names a *different* מרחב than the one selected
+(10 of 68 rows on the real file). Region is still always filled from the
+selection; the note only annotates disagreement.
+
+### Two parsing traps, both of which bit on the first run
+
+**1. Bidi extraction wedges punctuation *between* words.** The PDF stores RTL
+Hebrew laid out left-to-right, so a line arrives token-reversed with colons on
+the wrong side of their word: `מס. לקוח: KM103527` extracts as
+`,KM103527 :לקוח .מס`, and critically the two-word label `שם תחנה:` arrives
+as **`שם :תחנה`** - colon in the middle. Matching `"שם תחנה"` against the
+token-reversed line therefore never fires, and on the first run against the
+real file **all 68 rows** were flagged unparsed. Marker matching now goes
+through `_normalized()` (token-reverse, strip `:`/`,`, collapse whitespace),
+never `_logical()`. `_fix_swapped_hyphens()` separately restores `מ-8` from
+the `8-מ` bidi produces.
+
+**2. A station block continues across a page break.** Its rows on the next
+page have no repeated `שם תחנה` header. Station state was initialized per
+page, which orphaned the first 6 rows of page 2 - exactly **1,305 of the
+18,670 ק"ג**. Verified directly: page 1's last content line is the `KM113549`
+header with zero data rows under it, and page 2's first 6 data rows belong to
+it. That state now lives outside the page loop.
+
+Both bugs were caught only because `_unparsed_record()` turns a data-looking
+line that fails to parse into a flagged row carrying the raw text, instead of
+skipping it. **A silently dropped row in a 68-row report is invisible** - keep
+that behavior if this parser is ever reworked.
+
+A third detail in the same family: **the date is printed only when it
+changes.** Rows continuing a month leave the cell empty, so the month is
+forward-filled from the last row that had one, reset at each new station.
+
+### Isolation from the other mechanisms
+
+- **`reference_number` is deliberately left empty** even though
+  `certificate_or_reference` holds the station's customer number
+  (`KM103527`). `pipeline._cross_check_weighing_certificates()` indexes
+  candidates by `reference_number`, so this is what guarantees a customer
+  number can never be mistaken for a תעודת שקילה's printed number. Covered by
+  a test that feeds it a weighing certificate numbered `KM103527`.
+- **Duplicate detection skips these rows** (`duplicate_check._is_kmm_record`).
+  Not an arbitrary exclusion: the check looks for one shipment reported twice
+  through two channels, while this reports a month's total per station per
+  material. And its rows are *designed* to resemble each other - 53 of 68 are
+  the same material at the same station in different months and 115 ק"ג
+  recurs constantly - so the date/site/waste_type/quantity heuristic would
+  emit a blizzard of false "כפילות אפשרית" notes.
+- **None of the vision-error safety nets run** - no NameNormalizer, no
+  quantity-history outlier check, no gross/tare arithmetic, no
+  date-plausibility flag. They all exist to catch a vision model's mistakes
+  and nothing here was read by one; same reasoning `app/excel_input.py`
+  already applies to hand-typed rows.
+- **`DOCUMENT_TYPE_KMM_SUMMARY_REPORT` is deliberately NOT in
+  `DOCUMENT_TYPES`**, which is the closed list the *model* chooses from. The
+  model never sees this format, so it must not be offered it.
+
+### Detection
+
+`looks_like_kmm_report()` requires **both** an issuer marker (ק.מ.מ / k.m.m)
+and a report-title marker on page 1. One signal is not enough: that same
+company already appears in this project's history as an ordinary *invoice*
+issuer (see the 2026-09-01 invoice-filtering note above), and a certificate
+merely naming it as a supplier must not be misrouted into this parser.
+Anything that isn't a readable PDF - a non-PDF, an image, a scanned PDF with
+no text layer - returns False and falls through to the normal vision path
+rather than erroring. Verified against the other real files in `input/`.
+
+### Known cosmetic artifact, deliberately not fixed
+
+Gershayim inside Hebrew abbreviations land on the wrong side of their token:
+station `KM103527` reads `מ"שח מקורות ביצוע מ"בע ו סגור' מ-7` instead of
+`שח"ם מקורות ביצוע בע"מ ו' סגור מ-7`. Word order is correct; only the
+abbreviations are off, on 3-4 of the 16 station names. **Not auto-corrected on
+purpose:** a rule that swaps sides around the gershayim would also turn `ק"ג`
+into `ג"ק`, because both placements are legitimate in Hebrew (`בע"מ` puts it
+before the last letter, `ק"ג` after the first). A small explicit map of known
+abbreviations is the safe fix if this ever matters.
+
 `הערות` is deliberately kept to ~4-5 words (per the field description and
 system prompt in `extractor.py`/`fields.py`, 2026-08-23) — e.g. "כתב יד לא
 קריא" rather than a full sentence explaining what was inferred and why. This
