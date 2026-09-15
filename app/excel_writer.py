@@ -12,6 +12,7 @@ from .fields import (
     CERT_ROLE_WEIGHING_CERTIFICATE,
     CONFIDENCE_LEVELS,
     DOCUMENT_TYPE_CERTIFICATE,
+    LEGACY_REGION_TO_CURRENT,
     EXCEL_COLUMNS,
     HEBREW_MONTHS,
     INTERNAL_TRACKING_SHEET_COLUMNS,
@@ -760,11 +761,25 @@ def _write_summary_sheet(wb: Workbook) -> None:
     section_header("פירוט לפי מרחב")
     table_header(["מרחב", "מספר תעודות", 'סה"כ כמות (כל היחידות יחד)'])
     first_region_row = row
+    # Each region row counts its CURRENT name plus any legacy short label that
+    # maps to it (fields.LEGACY_REGION_TO_CURRENT - e.g. "צפון" for
+    # "מרחב צפון"), because the 2026-09-15 rename deliberately did NOT rewrite
+    # rows written before it. Without this, every pre-rename row would drop
+    # into the "ללא מרחב מזוהה" catch-all below and be reported as having no
+    # region at all, which would be simply false. Still only exact-value
+    # COUNTIF/SUMIF added together - no blank/non-blank testing, per this
+    # sheet's verified-formula rule above.
+    legacy_by_current = {}
+    for legacy, current in LEGACY_REGION_TO_CURRENT.items():
+        legacy_by_current.setdefault(current, []).append(legacy)
+
     for region in REGIONS:
+        labels = [region] + legacy_by_current.get(region, [])
+        count = "+".join(f"COUNTIF({region_range},{q(label)})" for label in labels)
+        total = "+".join(f"SUMIF({region_range},{q(label)},{qty_range})" for label in labels)
         write_cell(row, 1, region)
-        write_cell(row, 2, f"=COUNTIF({region_range},{q(region)})", align="center")
-        write_cell(row, 3, f"=SUMIF({region_range},{q(region)},{qty_range})",
-                   align="center", number_format=_QTY_NUMBER_FORMAT)
+        write_cell(row, 2, f"={count}", align="center")
+        write_cell(row, 3, f"={total}", align="center", number_format=_QTY_NUMBER_FORMAT)
         row += 1
     last_known_region_row = row - 1
 

@@ -29,6 +29,7 @@ from .derive import derive_year_month
 from .excel_writer import parse_quantity
 from .image_utils import MAX_IMAGE_BYTES, PDF_RENDER_SCALE, downscale_and_encode, encode_image_block
 from .fields import (
+    BATCH_SELECTION_KEYS,
     CERT_ROLE_BILL_OF_LADING_ZERO,
     CERT_ROLE_COMPLETION,
     CERT_ROLE_WEIGHING,
@@ -37,10 +38,7 @@ from .fields import (
     DOCUMENT_TYPE_OTHER,
     FIELD_DEFS,
     HEBREW_MONTHS,
-    REGIONS,
     TOOL_NAME,
-    UNCLASSIFIED_WASTE_TYPE,
-    WASTE_TYPES,
     empty_record,
 )
 from .normalize import looks_reversed_hebrew
@@ -59,12 +57,24 @@ _MIN_PLAUSIBLE_YEAR = 2015
 # entry any more (the raw "date" field is, instead) - the check still keys
 # off "year" internally, just labeled here to match the column a reviewer
 # actually sees.
+# Core fields whose absence should always get a record flagged for manual
+# review, regardless of what the model itself reports for רמת_ביטחון.
+#
+# Shrunk 2026-09-15: waste_type/site/region left this list because they are no
+# longer extracted at all - they come from the user's per-batch selection (see
+# fields.BATCH_SELECTION_KEYS and pipeline.apply_batch_selection), so they can
+# never be "missing because the model couldn't read them", which is the only
+# thing this check is about. Leaving them here would have flagged every single
+# record: the selection is applied after extraction, so at this point in
+# _extract_page they are always still blank.
+#
+# year/month are derived together from the same "date" value (see
+# derive_year_month) and aren't their own EXCEL_COLUMNS entry any more (the raw
+# "date" field is, instead) - the check still keys off "year" internally, just
+# labeled here to match the column a reviewer actually sees.
 _CORE_FIELD_LABELS = [
-    ("waste_type", "סוג הפסולת"),
     ("quantity", "כמות"),
     ("unit", "יחידת מידה"),
-    ("site", "אתר/יחידה"),
-    ("region", "מרחב"),
     ("year", "תאריך"),
 ]
 
@@ -96,9 +106,10 @@ _SYSTEM_PROMPT = (
     "בגלל ששדה אחר לא ניתן. ההפך גם נכון: אל תוותרו מראש על ניסיון לקרוא שדה רק כי "
     "הכתב יד קשה - קראו כמיטב יכולתכם ומלאו את מה שאתם כן מזהים בביטחון סביר. "
     "אם שדה כלשהו אינו ניתן לזיהוי ודאי, או שמילויו מצריך הסקה/ניחוש - השאר אותו "
-    "כמחרוזת ריקה. שדה ריק תמיד עדיף על ניחוש שגוי. יוצא מן הכלל היחיד הוא "
-    "סוג_הפסולת - ראו את הוראות השדה עצמו: שם אסור להשאיר ריק, ויש להחזיר "
-    f"'{UNCLASSIFIED_WASTE_TYPE}' כשהפריט לא תואם לרשימה הסגורה. "
+    "כמחרוזת ריקה. שדה ריק תמיד עדיף על ניחוש שגוי, בלי שום יוצא מן הכלל. "
+    "שים לב: אינך מתבקש לזהות מרחב, אתר/מקור או סוג פסולת - שלושת אלה נקבעים "
+    "מחוץ לתהליך הקריאה ואינם חלק מהשדות שעליך למלא. אל תחפש אותם ואל תתייחס "
+    "אליהם. "
     "כלל אצבע לשאר השדות: אם אתה עומד לכתוב בשדה הערות שהערך שמילאת הוא 'הנחה', "
     "'הערכה' או 'ניחוש' - זהו סימן שהיה עליך להשאיר את השדה עצמו ריק ולתאר את חוסר "
     "הוודאות רק בהערות, לא למלא אותו. "
@@ -158,9 +169,8 @@ _SYSTEM_PROMPT = (
     "אל תעיר בשדה הערות על סבירות התאריך (למשל 'תאריך עתידי') - אין לך דרך לדעת "
     "מהו התאריך האמיתי של היום, ובדיקה כזו נעשית באופן מדויק ואוטומטי בקוד לאחר "
     "החילוץ; חלץ את התאריך כפי שהוא כתוב בתעודה בלבד, ללא הערכה משלך על סבירותו. "
-    f"חריג: כשמחזירים '{UNCLASSIFIED_WASTE_TYPE}' בסוג_הפסולת, או '{DOCUMENT_TYPE_OTHER}' "
-    "בסוג_המסמך, כן יש לכתוב בהערות תיאור מדויק (התיאור המקורי מהתעודה, או סוג "
-    "המסמך בהתאמה) גם אם זה יותר מ-4-5 מילים."
+    f"חריג: כשמחזירים '{DOCUMENT_TYPE_OTHER}' בסוג_המסמך, כן יש לכתוב בהערות "
+    "תיאור מדויק של סוג המסמך גם אם זה יותר מ-4-5 מילים."
 )
 
 
@@ -182,50 +192,23 @@ def _build_tool_schema() -> dict:
 
 
 def _flag_out_of_list_values(record: dict) -> None:
-    """Downgrades confidence and appends a note when a closed-list field is out
-    of range. UNCLASSIFIED_WASTE_TYPE is deliberately exempt here - it's the
-    model correctly following instructions (see FIELD_DEFS's waste_type
-    description), not a violation of the closed list; see
-    _flag_unclassified_waste_type() for its own, milder handling.
-    """
-    issues = []
-    if (
-        record["waste_type"]
-        and record["waste_type"] != UNCLASSIFIED_WASTE_TYPE
-        and record["waste_type"] not in WASTE_TYPES
-    ):
-        issues.append(f"סוג_פסולת לא מזוהה: '{record['waste_type']}'")
-    if record["region"] and record["region"] not in REGIONS:
-        issues.append(f"מרחב לא מזוהה: '{record['region']}'")
-    if record["confidence"] not in CONFIDENCE_LEVELS:
-        record["confidence"] = record["confidence"] or "נמוכה"
+    """Downgrades confidence and appends a note when the model's self-reported
+    רמת_ביטחון isn't one of the closed CONFIDENCE_LEVELS values.
 
-    if issues:
+    Shrunk to that single check 2026-09-15. It used to also validate
+    waste_type against WASTE_TYPES and region against REGIONS - the two fields
+    the "don't guess is prompt-only" limitation in CLAUDE.md was really about.
+    Neither is extracted any more (both come from the user's per-batch
+    selection - see fields.BATCH_SELECTION_KEYS), so there is nothing left for
+    the model to drift off, and that whole class of "plausible but wrong
+    inferred category" bug is now gone by construction rather than caught by
+    validation.
+    """
+    if record.get("confidence") not in CONFIDENCE_LEVELS:
         record["confidence"] = "נמוכה"
-        note = "; ".join(issues)
-        record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
-
-
-def _flag_unclassified_waste_type(record: dict) -> None:
-    """Ensures a record the model marked UNCLASSIFIED_WASTE_TYPE always
-    surfaces for manual review (to judge whether a new category is needed),
-    even if the model's own רמת_ביטחון claimed "גבוהה" - it read the
-    certificate clearly, it just found nothing in the closed list to match,
-    which is exactly the situation a human should weigh in on.
-
-    Escalates to "בינונית", not "נמוכה" - unlike _flag_out_of_list_values
-    (an actual violation of the closed-list instruction) this is the model
-    correctly following instructions, so it doesn't warrant the same
-    severity as a genuine error; _enforce_core_field_confidence's "already at
-    least בינונית" rows are left alone, matching that function's own pattern.
-    """
-    if record.get("waste_type") != UNCLASSIFIED_WASTE_TYPE:
-        return
-    if record["confidence"] not in ("נמוכה", "בינונית"):
-        record["confidence"] = "בינונית"
-    note = "סוג פסולת לא מסווג - לשקול קטגוריה חדשה"
-    if note not in (record.get("notes") or ""):
-        record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
+        note = "רמת ביטחון לא תקינה"
+        if note not in (record.get("notes") or ""):
+            record["notes"] = f"{record['notes']} | {note}" if record.get("notes") else note
 
 
 def _enforce_core_field_confidence(record: dict) -> None:
@@ -304,10 +287,12 @@ def _flag_unreasonable_date(record: dict) -> None:
     record["notes"] = f"{record['notes']} | {note}" if record["notes"] else note
 
 
+# site left this list 2026-09-15 - it is no longer model-read (it comes from
+# the user's per-batch selection), so there is no OCR/RTL reversal to detect
+# on it any more. supplier_or_carrier and driver_name are still extracted.
 _REVERSAL_CHECK_FIELDS = [
-    ("site", "אתר/מקור"),
     ("supplier_or_carrier", "אתר קולט"),
-    ("driver_name", "שם נהג"),
+    ("driver_name", "שם הנהג"),
 ]
 
 
@@ -417,7 +402,7 @@ def _flag_bill_of_lading_estimate(record: dict) -> None:
     was read perfectly clearly - its quantity (if any) is, at best, a
     textual estimate extracted from free text, never an actual weighing.
 
-    Escalates to "בינונית" like _flag_unclassified_waste_type's pattern
+    Escalates to "בינונית" rather than downgrading (the model correctly
     (the model correctly followed instructions here; this isn't an error),
     never downgrading a row already at "נמוכה"/"בינונית" for another reason.
     May be superseded later at the batch level, across every file in this
@@ -474,6 +459,12 @@ def _strip_weighing_certificate(record: dict) -> None:
     for name, *_ in FIELD_DEFS:
         if name not in _WEIGHING_CERTIFICATE_KEPT_FIELDS:
             record[name] = ""
+    # Not FIELD_DEFS keys any more, so the loop above doesn't cover them.
+    # Cleared anyway: this page never becomes a row, and
+    # pipeline.apply_batch_selection deliberately skips it, so leaving a
+    # selection value here would be misleading if it were ever inspected.
+    for key in BATCH_SELECTION_KEYS:
+        record[key] = ""
     record["year"], record["month"] = "", ""
     record["certificate_number"] = number
     # Shown as this page's id on the "מעקב פנימי" sheet when it ends up with
@@ -692,7 +683,6 @@ def _extract_page(image: Image.Image, client: anthropic.Anthropic, use_examples:
         _strip_weighing_certificate(record)
     else:
         _flag_out_of_list_values(record)
-        _flag_unclassified_waste_type(record)
         record["year"], record["month"] = derive_year_month(record["date"])
         _flag_unreasonable_date(record)
         # Display/fallback id for the "מספר תעודה/אסמכתא" column - most

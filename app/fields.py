@@ -32,6 +32,8 @@ Three lists matter here, and each is edited independently:
                   self-sufficient without relying on row order alone.
 """
 
+from .sites_config import REGION_NAMES
+
 WASTE_TYPES = [
     "גזם",
     "קרטונים",
@@ -146,7 +148,33 @@ WEIGHING_PAGE_NUMBER_KEY = "weighing_page_number"
 # orphan.
 WEIGHING_MATCHED_KEY = "_weighing_matched"
 
-REGIONS = ["צפון", "דרום", "מרכז", "מטה"]
+# The closed list of מרחבים, sourced from app/sites_config.py so the dropdown
+# the user picks from and everything downstream (excel_writer.py's summary
+# sheet, streamlit_app.py's results-table dropdown) can never disagree.
+#
+# Renamed/expanded 2026-09-15 from the original four short labels
+# ["צפון", "דרום", "מרכז", "מטה"] to the six real org names. Rows written
+# before that keep their old short label untouched (per an explicit
+# requirement) - excel_writer.py's summary sheet counts both spellings into
+# the same row, see _LEGACY_REGION_ALIASES there, so old data stays correctly
+# counted without being rewritten.
+REGIONS = REGION_NAMES
+
+# Legacy short region labels, for reading/aggregating pre-2026-09-15 rows
+# only. Never offered as a choice anywhere. "מטה" is deliberately absent - it
+# is spelled identically in both the old and the new list.
+LEGACY_REGION_TO_CURRENT = {
+    "צפון": "מרחב צפון",
+    "דרום": "מרחב דרום",
+    "מרכז": "מרחב מרכז",
+}
+
+# The three columns that are NO LONGER extracted from the document (2026-09-15)
+# and are instead filled from the user's per-batch selection - see
+# pipeline.apply_batch_selection() and app/sites_config.py. They are not in
+# FIELD_DEFS any more, so empty_record() adds them explicitly (like the other
+# derived keys) and every record still carries them for EXCEL_COLUMNS.
+BATCH_SELECTION_KEYS = ("region", "site", "waste_type")
 
 CONFIDENCE_LEVELS = ["גבוהה", "בינונית", "נמוכה"]
 
@@ -225,18 +253,6 @@ FIELD_DEFS = [
         "string",
     ),
     (
-        "waste_type",
-        "סוג הפסולת - יש לבחור אך ורק מתוך הרשימה הסגורה: "
-        + ", ".join(WASTE_TYPES)
-        + f", או '{UNCLASSIFIED_WASTE_TYPE}'. התאם קטגוריה מהרשימה רק אם סוג הפריט "
-        + "כתוב או מתואר במפורש בתעודה עצמה בצורה התואמת ישירות לאחת מהאפשרויות. "
-        + "אל תסווג לפי שם הקובץ, סוג העסק המנפיק, או ניחוש כללי מהקשר. אם הפריט "
-        + f"לא תואם באופן ישיר וברור לאף אחת מהאפשרויות - אל תשאיר ריק, החזר '{UNCLASSIFIED_WASTE_TYPE}' "
-        + "ותאר בשדה ההערות במדויק את התיאור המקורי כפי שהוא מופיע בתעודה (למשל: "
-        + "\"בתעודה נכתב 'סוללות'\") כדי שאפשר יהיה לשקול הוספת קטגוריה חדשה בעתיד.",
-        "string",
-    ),
-    (
         "gross_weight",
         "משקל ברוטו (משקל הרכב יחד עם המטען), מספר בלבד (ללא יחידת מידה) - "
         "מופיע בעיקר בתעודות שקילה ממוחשבות, יחד עם טרה ונטו, בשלוש תיבות "
@@ -306,21 +322,6 @@ FIELD_DEFS = [
     (
         "unit",
         'יחידת המידה כפי שהיא מופיעה בתעודה (למשל ק"ג, טון, מ"ק, ליטר, יחידות).',
-        "string",
-    ),
-    (
-        "site",
-        "שם האתר/היחידה שממנה נאספה הפסולת. יכול להופיע בכל מקום בעמוד (למעלה, "
-        "למטה, בתוך טבלה או מחוצה לה) - חפש בכל האזורים, לא רק במקום הצפוי.",
-        "string",
-    ),
-    (
-        "region",
-        "המרחב שאליו שייך האתר - "
-        + ", ".join(REGIONS)
-        + ". מלא רק אם המרחב כתוב במפורש בתעודה, או אם שם האתר הוא ללא כל ספק "
-        + "וללא צורך בהסקה מזוהה אצלך כשייך לאותו מרחב באופן חד-משמעי. אם נדרשת "
-        + "הסקה, השערה, או שאתה לא בטוח לחלוטין - השאר ריק.",
         "string",
     ),
     (
@@ -480,6 +481,11 @@ def empty_record(filename: str = "", error: str = "") -> dict:
     couldn't even be opened/split).
     """
     record = {name: "" for name, *_ in FIELD_DEFS}
+    # Not FIELD_DEFS keys any more (2026-09-15 - filled from the batch
+    # selection, not read off the document), but still EXCEL_COLUMNS columns,
+    # so every record must carry them or the writer would emit a short row.
+    for key in BATCH_SELECTION_KEYS:
+        record[key] = ""
     record["source_file"] = filename
     record["year"] = ""
     record["month"] = ""
