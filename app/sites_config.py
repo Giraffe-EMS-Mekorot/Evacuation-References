@@ -27,7 +27,7 @@ from typing import Dict, List
 # or disabled control. Any code reading this must therefore treat "no sites"
 # as a valid, supported state - see region_has_sites().
 REGION_SITES: Dict[str, List[str]] = {
-    "מטה": ["מחסן מרכזי (שחם)", "יחדית רכש"],
+    "מטה": ["מחסן מרכזי (שחם)", "יחידת רכש"],
     "מרחב צפון": ["גליל", "עמקים"],
     "מרחב דרום": ["נגב צפוני", "נגב מרכזי", "ערבה"],
     "מרחב מרכז": ["צפון ירקון", "דרום ירקון", "שפדן"],
