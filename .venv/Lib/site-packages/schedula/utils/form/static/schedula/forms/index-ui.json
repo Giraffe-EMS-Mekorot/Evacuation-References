@@ -1,0 +1,93 @@
+{
+  "ui:onlyChildren": true,
+  "ui:configProvider": {
+    "dark": false,
+    "local": "en",
+    "theme": {
+      "token": {
+        "sizeUnit": 2
+      }
+    }
+  },
+  "ui:layout": {
+    "component": "App",
+    "props": {
+      "theme": "light"
+    },
+    "children": [
+      {
+        "component": "FlexLayout",
+        "props": {
+          "model": {
+            "global": {
+              "tabEnableClose": false
+            },
+            "layout": {
+              "type": "row",
+              "children": [
+                {
+                  "type": "row",
+                  "children": [
+                    {
+                      "type": "tabset",
+                      "weight": 50,
+                      "children": [
+                        {
+                          "type": "tab",
+                          "name": "INPUT",
+                          "component": 0
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tabset",
+                      "domain": "({formData})=>(((formData.return || {}).results || []).length > 0)",
+                      "weight": 100,
+                      "children": [
+                        {
+                          "type": "tab",
+                          "name": "OUTPUT",
+                          "component": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "children": [
+          {
+            "component": "Element",
+            "props": {
+              "type": "div",
+              "style": {
+                "padding": 18
+              }
+            },
+            "children": [
+              {
+                "path": "input/kwargs/inputs"
+              }
+            ]
+          },
+          {
+            "component": "Element",
+            "props": {
+              "type": "div",
+              "style": {
+                "padding": 18
+              }
+            },
+            "children": [
+              {
+                "path": "return/results"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

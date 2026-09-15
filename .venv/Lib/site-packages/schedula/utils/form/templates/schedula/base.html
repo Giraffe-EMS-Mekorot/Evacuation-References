@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="{{ get_locale() }}" style="height: 100vh">
+<head>
+    {% block head %}
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% block title %}
+    <title>{% block title_name %}{{ name }}{% endblock %}</title>
+    <link rel="shortcut icon"
+          href="{{ url_for('static', filename='favicon.ico') }}"/>
+    {% endblock %}
+    {% block js %}
+    <script>
+        window.getPublicPath = function () {
+            {% if is_static %}
+            let urlWithoutQuery = window.location.origin + window.location.pathname;
+            if (!urlWithoutQuery.endsWith('/')) {
+                urlWithoutQuery += '/';
+            }
+            return urlWithoutQuery
+            {% else %}
+            return  window.location.origin.replace(/\/+$/, '') + "/" +"{{ app_root }}".replace(/^\/+/, '')
+            {% endif %}
+        };
+    </script>
+    <script src="{{ url_for('schedula.static', filename=main_js) }}"></script>
+    {% if props_js %}
+    <script src="{{ url_for('schedula.static', filename=props_js) }}"></script>
+    {% endif %}
+    {% endblock %}
+    {% block css %}
+    <link href="{{ url_for('schedula.static', filename=main_css) }}"
+          rel="stylesheet">
+    {% if props_css %}
+    <link href="{{ url_for('schedula.static', filename=props_css) }}"
+          rel="stylesheet">
+    {% endif %}
+    {% endblock %}
+
+    {% block alive_func %}
+    {% if 'alive' in app.view_functions %}
+    <script>
+        async function imAlive() {
+            const alive_url = "{{ url_for('alive') }}";
+            const alive_period = {{ (app.alive_period or 600) * 1000 }};
+            let response, fail = 0;
+            while (alive_url) {
+                await new Promise(resolve => setTimeout(resolve, alive_period));
+                response = await fetch(window.getPublicPath() + alive_url);
+                if (response.status === 200) {
+                    fail = 0
+                } else if (response.status === 503) {
+                    document.open()
+                    document.write(await response.text())
+                    document.close()
+                    break;
+                } else {
+                    fail++
+                }
+                if (fail === 5) break;
+            }
+        }
+
+        imAlive();
+    </script>
+    {% endif %}
+    {% endblock %}
+
+    {% block js_onload %}
+    <script defer="defer">
+         async function fetchData(filename) {
+            const forms_url = "{{ url_for('schedula.static', filename='forms') }}",
+                url = `${window.getPublicPath()}${forms_url}/${filename}`
+            return fetch(url, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Encoding': 'gzip',
+                    'Accept-Encoding': 'gzip'
+                }
+            }).then(v => v.json())
+        }
+
+        function onLoad() {
+            let name = "{{ form_id or 'index' }}",
+                url = "{{ url_for('schedula.api.root') }}",
+                {
+                    formContext: _formContext,
+                    language,
+                    ..._schedulaProps
+                } = window.schedulaProps || {},
+                element = document.getElementById('root'),
+                csrf_token = "{{ csrf_token and csrf_token() or '' }}",
+                formData = JSON.parse('{{ form.get_form_data() | tojson | safe}}');
+            let formContext = {
+                ..._formContext,
+                ...JSON.parse('{{ form.get_form_context() | tojson | safe}}')
+            }
+            Promise.all([
+                fetchData(`${name}-schema.json`),
+                fetchData(`${name}-ui.json`).catch(error => {
+                    return {};
+                }),
+                fetch(`${window.getPublicPath()}locales/${language || 'none'}`)
+                    .then(v => v.json()).catch(error => {
+                    return {language: 'en_US'};
+                })
+            ]).then(([schema, uiSchema, {language}]) => {
+                document.title = uiSchema.title || schema.title || "{{ name }}"
+                schedula.renderForm({
+                    element,
+                    url,
+                    name,
+                    schema,
+                    uiSchema,
+                    csrf_token,
+                    formData,
+                    formContext,
+                    language,
+                    onLoad: async (form) => {
+                        const messages = JSON.parse('{{ get_flashed_messages(with_categories=True)| tojson | safe}}')
+                        form.flashMessages(messages)
+                        fetchData(`${name}-data.json`).then(formData => {
+                            form.onChange(formData)
+                        }).catch(error => {})
+                    },
+                    ..._schedulaProps
+                })
+            });
+        }
+
+        window.addEventListener('DOMContentLoaded', onLoad);
+    </script>
+    {% endblock %}
+    {% block head_content %}
+    {% endblock %}
+    {% endblock %}
+</head>
+<body style="background-color: white; height: 100%">
+<div id="content" style="height: 100%">
+    {% block content %}
+    <div id="root" style="height: 100%"></div>
+    {% endblock %}
+</div>
+</body>
+</html>

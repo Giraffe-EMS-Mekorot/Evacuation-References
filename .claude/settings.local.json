@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/python -m pip install -q -r requirements.txt)",
+      "Bash(.venv/Scripts/python *)",
+      "Bash(echo \"---exit: $?---\")"
+    ]
+  }
+}

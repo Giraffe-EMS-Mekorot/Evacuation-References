@@ -1,19 +1,2 @@
 .env
 .streamlit/secrets.toml
-.claude/settings.local.json
-__pycache__/
-*.pyc
-.venv/
-venv/
-output/*.xlsx
-input/*
-!input/.gitkeep
-
-# Few-shot example library (app/examples_library.py) - same "real business
-# documents/data don't belong in git" policy as input/ and output/*.xlsx
-# above: index.xlsx holds real ground-truth field values, and each category
-# folder holds real certificate scans. Only the folder structure (.gitkeep)
-# and README.md (pure documentation, no real data) are tracked.
-examples/index.xlsx
-examples/*/*
-!examples/*/.gitkeep

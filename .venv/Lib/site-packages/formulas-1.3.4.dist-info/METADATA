@@ -1,0 +1,586 @@
+Metadata-Version: 2.4
+Name: formulas
+Version: 1.3.4
+Summary: Parse and compile Excel formulas and workbooks in python code.
+Home-page: https://github.com/vinci1it2000/formulas
+Download-URL: https://github.com/vinci1it2000/formulas/tarball/v1.3.4
+Author: Vincenzo Arcidiacono
+Author-email: vinci1it2000@gmail.com
+License: EUPL 1.1+
+Project-URL: Documentation, http://formulas.readthedocs.io
+Project-URL: Issue tracker, https://github.com/vinci1it2000/formulas/issues
+Project-URL: Donate, https://donorbox.org/formulas
+Keywords: python,utility,library,excel,formulas,processing,calculation,dependencies,resolution,scientific,engineering,dispatch,compiling
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Natural Language :: English
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: European Union Public Licence 1.1 (EUPL 1.1)
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Operating System :: POSIX
+Classifier: Operating System :: Unix
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: Information Analysis
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Topic :: Utilities
+License-File: LICENSE.txt
+License-File: AUTHORS.rst
+Requires-Dist: click
+Requires-Dist: regex
+Requires-Dist: schedula>=1.4.1
+Requires-Dist: numpy>=1.15
+Requires-Dist: python-dateutil
+Requires-Dist: numpy-financial
+Requires-Dist: scipy
+Requires-Dist: tqdm
+Provides-Extra: excel
+Requires-Dist: openpyxl; extra == "excel"
+Requires-Dist: dictdiffer; extra == "excel"
+Requires-Dist: ezodf; extra == "excel"
+Requires-Dist: lxml; extra == "excel"
+Provides-Extra: plot
+Requires-Dist: graphviz; extra == "plot"
+Requires-Dist: regex; extra == "plot"
+Requires-Dist: flask; extra == "plot"
+Requires-Dist: Pygments; extra == "plot"
+Requires-Dist: jinja2; extra == "plot"
+Requires-Dist: docutils; extra == "plot"
+Provides-Extra: cli
+Requires-Dist: openpyxl; extra == "cli"
+Requires-Dist: dictdiffer; extra == "cli"
+Requires-Dist: ezodf; extra == "cli"
+Requires-Dist: lxml; extra == "cli"
+Requires-Dist: click; extra == "cli"
+Requires-Dist: click_log; extra == "cli"
+Requires-Dist: flask; extra == "cli"
+Provides-Extra: all
+Requires-Dist: Pygments; extra == "all"
+Requires-Dist: click; extra == "all"
+Requires-Dist: click_log; extra == "all"
+Requires-Dist: dictdiffer; extra == "all"
+Requires-Dist: docutils; extra == "all"
+Requires-Dist: ezodf; extra == "all"
+Requires-Dist: flask; extra == "all"
+Requires-Dist: graphviz; extra == "all"
+Requires-Dist: jinja2; extra == "all"
+Requires-Dist: lxml; extra == "all"
+Requires-Dist: openpyxl; extra == "all"
+Requires-Dist: regex; extra == "all"
+Provides-Extra: dev
+Requires-Dist: Pygments; extra == "dev"
+Requires-Dist: click; extra == "dev"
+Requires-Dist: click_log; extra == "dev"
+Requires-Dist: dictdiffer; extra == "dev"
+Requires-Dist: docutils; extra == "dev"
+Requires-Dist: ezodf; extra == "dev"
+Requires-Dist: flask; extra == "dev"
+Requires-Dist: graphviz; extra == "dev"
+Requires-Dist: jinja2; extra == "dev"
+Requires-Dist: lxml; extra == "dev"
+Requires-Dist: openpyxl; extra == "dev"
+Requires-Dist: regex; extra == "dev"
+Requires-Dist: wheel; extra == "dev"
+Requires-Dist: sphinx>=7.2; extra == "dev"
+Requires-Dist: gitchangelog; extra == "dev"
+Requires-Dist: mako; extra == "dev"
+Requires-Dist: sphinx_rtd_theme; extra == "dev"
+Requires-Dist: setuptools>=36.0.1; extra == "dev"
+Requires-Dist: sphinxcontrib-restbuilder; extra == "dev"
+Requires-Dist: coveralls; extra == "dev"
+Requires-Dist: ddt; extra == "dev"
+Requires-Dist: twine; extra == "dev"
+Requires-Dist: sphinx_click; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: download-url
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: summary
+
+.. _start-intro:
+
+
+What is formulas?
+*****************
+
+**formulas** implements an interpreter for Excel formulas, which
+parses and compile Excel formulas expressions.
+
+Moreover, it compiles Excel workbooks to python and executes without
+using the Excel COM server. Hence, **Excel is not needed**.
+
+
+Installation
+************
+
+To install it use (with root privileges):
+
+.. code:: console
+
+   $ pip install formulas
+
+Or download the last git version and use (with root privileges):
+
+.. code:: console
+
+   $ python setup.py install
+
+
+Install extras
+==============
+
+Some additional functionality is enabled installing the following
+extras:
+
+*  excel: enables to compile Excel workbooks to python and execute
+   using: ``ExcelModel``.
+
+*  plot: enables to plot the formula ast and the Excel model.
+
+To install formulas and all extras, do:
+
+.. code:: console
+
+   $ pip install formulas[all]
+
+
+Development version
+===================
+
+To help with the testing and the development of *formulas*, you can
+install the development version:
+
+.. code:: console
+
+   $ pip install https://github.com/vinci1it2000/formulas/archive/dev.zip
+
+
+CLI Quickstart
+**************
+
+The *formulas* command-line interface works with spreadsheet models
+and accepts *.xlsx*, *.ods*, and *.json* inputs.
+
+A typical workflow starts by calculating a workbook. You can override
+input values directly from the command line and request specific cells
+to be rendered in the output.
+
+.. code:: console
+
+   $ formulas calc test/test_files/excel.xlsx \
+       --overwrite "'[excel.xlsx]'!INPUT_A=3" \
+       --overwrite "'[excel.xlsx]DATA'!B3=1" \
+       --render "'[excel.xlsx]DATA'!C2=result" \
+       --output-format json
+
+Spreadsheet models can also be converted into a portable JSON
+representation. This is useful when the model needs to be versioned,
+inspected, or executed without the original workbook.
+
+.. code:: console
+
+   $ formulas build test/test_files/excel.xlsx \
+       --output-file model.json
+
+For validation purposes, a workbook can be tested directly from the
+CLI. The following command runs the tests and prints a short summary.
+
+.. code:: console
+
+   $ formulas test test/test_files/excel.xlsx --summary
+
+Finally, a model can be exposed as a lightweight HTTP API, allowing
+other applications to execute it remotely. The *serve* command
+requires the optional web dependencies (*pip install formulas[web]*).
+
+.. code:: console
+
+   $ formulas serve test/test_files/excel.xlsx \
+       --host 127.0.0.1 \
+       --port 5000
+
+Each command provides additional options and examples through the
+built-in help system:
+
+.. code:: console
+
+   $ formulas COMMAND --help
+
+.. _end-quick:
+
+
+Basic Examples
+**************
+
+The following sections will show how to:
+
+*  parse a Excel formulas;
+
+*  load, compile, and execute a Excel workbook;
+
+*  extract a sub-model from a Excel workbook;
+
+*  add a custom function.
+
+
+Parsing formula
+===============
+
+An example how to parse and execute an Excel formula is the following:
+
+>>> import formulas
+>>> func = formulas.Parser().ast('=(1 + 1) + B3 / A2')[1].compile()
+
+To visualize formula model and get the input order you can do the
+following:
+
+>>> list(func.inputs)
+['A2', 'B3']
+>>> func.plot(view=False)  # Set view=True to plot in the default browser.
+SiteMap({=((1 + 1) + (B3 / A2)): SiteMap({})})
+
+[graph]
+
+Finally to execute the formula and plot the workflow:
+
+>>> func(1, 5)
+Array(7.0, dtype=object)
+>>> func.plot(workflow=True, view=False)  # Set view=True to plot in the default browser.
+SiteMap({=((1 + 1) + (B3 / A2)): SiteMap({})})
+
+[graph]
+
+
+Excel workbook
+==============
+
+An example how to load, calculate, and write an Excel workbook is the
+following:
+
+::
+
+   >>> import formulas
+   >>> fpath, dir_output = 'excel.xlsx', 'output'
+   >>> xl_model = formulas.ExcelModel().loads(fpath).finish()
+   >>> xl_model.calculate()
+   Solution(...)
+   >>> xl_model.write(dirpath=dir_output)
+   {'EXCEL.XLSX': {Book: <openpyxl.workbook.workbook.Workbook ...>}}
+
+Tip: If you have or could have **circular references**, add
+   *circular=True* to *finish* method.
+
+To plot the dependency graph that depict relationships between Excel
+cells:
+
+>>> dsp = xl_model.dsp
+>>> dsp.plot(view=False)  # Set view=True to plot in the default browser.
+SiteMap({ExcelModel: SiteMap(...)})
+
+[graph]
+
+To overwrite the default inputs that are defined by the excel file or
+to impose some value to a specific cell:
+
+>>> xl_model.calculate(
+...     inputs={
+...         "'[excel.xlsx]'!INPUT_A": 3,  # To overwrite the default value.
+...         "'[excel.xlsx]DATA'!B3": 1  # To impose a value to B3 cell.
+...     },
+...     outputs=[
+...        "'[excel.xlsx]DATA'!C2", "'[excel.xlsx]DATA'!C4"
+...     ] # To define the outputs that you want to calculate.
+... )
+ Solution({"'[excel.xlsx]'!INPUT_A": <Ranges>('[excel.xlsx]DATA'!A2)=[[3]],
+           "'[excel.xlsx]DATA'!B3": <Ranges>('[excel.xlsx]DATA'!B3)=[[1]],
+           "'[excel.xlsx]DATA'!A2": <Ranges>('[excel.xlsx]DATA'!A2)=[[3]],
+           "'[excel.xlsx]DATA'!A3": <Ranges>('[excel.xlsx]DATA'!A3)=[[6]],
+           "'[excel.xlsx]DATA'!A4": <Ranges>('[excel.xlsx]DATA'!A4)=[[5]],
+           "'[excel.xlsx]DATA'!D2": <Ranges>('[excel.xlsx]DATA'!D2)=[[1]],
+           "'[excel.xlsx]'!INPUT_B": <Ranges>('[excel.xlsx]DATA'!A3)=[[6]],
+           "'[excel.xlsx]'!INPUT_C": <Ranges>('[excel.xlsx]DATA'!A4)=[[5]],
+           "'[excel.xlsx]DATA'!A3:A4": <Ranges>('[excel.xlsx]DATA'!A3:A4)=[[6] [5]],
+           "'[excel.xlsx]DATA'!B2": <Ranges>('[excel.xlsx]DATA'!B2)=[[9.0]],
+           "'[excel.xlsx]DATA'!D3": <Ranges>('[excel.xlsx]DATA'!D3)=[[2.0]],
+           "'[excel.xlsx]DATA'!C2": <Ranges>('[excel.xlsx]DATA'!C2)=[[10.0]],
+           "'[excel.xlsx]DATA'!D4": <Ranges>('[excel.xlsx]DATA'!D4)=[[3.0]],
+           "'[excel.xlsx]DATA'!C4": <Ranges>('[excel.xlsx]DATA'!C4)=[[4.0]]})
+
+To build a single function out of an excel model with fixed inputs and
+outputs, you can use the *compile* method of the *ExcelModel* that
+returns a `DispatchPipe
+<https://schedula.readthedocs.io/en/master/_build/schedula/utils/dsp/schedula.utils.dsp.DispatchPipe.html#schedula.utils.dsp.DispatchPipe>`_.
+This is a function where the inputs and outputs are defined by the
+data node ids (i.e., cell references).
+
+>>> func = xl_model.compile(
+...     inputs=[
+...         "'[excel.xlsx]'!INPUT_A",  # First argument of the function.
+...         "'[excel.xlsx]DATA'!B3"   # Second argument of the function.
+...     ], # To define function inputs.
+...     outputs=[
+...         "'[excel.xlsx]DATA'!C2", "'[excel.xlsx]DATA'!C4"
+...     ] # To define function outputs.
+... )
+>>> func
+<schedula.utils.dsp.DispatchPipe object at ...>
+>>> [v.value[0, 0] for v in func(3, 1)]  # To retrieve the data.
+[10.0, 4.0]
+>>> func.plot(view=False)  # Set view=True to plot in the default browser.
+SiteMap({ExcelModel: SiteMap(...)})
+
+[graph]
+
+Alternatively, to load a partial excel model from the output cells,
+you can use the *from_ranges* method of the *ExcelModel*:
+
+>>> xl = formulas.ExcelModel().from_ranges(
+...     "'[%s]DATA'!C2:D2" % fpath,  # Output range.
+...     "'[%s]DATA'!B4" % fpath,  # Output cell.
+... )
+>>> dsp = xl.dsp
+>>> sorted(dsp.data_nodes)
+["'[excel.xlsx]'!INPUT_A",
+ "'[excel.xlsx]'!INPUT_B",
+ "'[excel.xlsx]'!INPUT_C",
+ "'[excel.xlsx]DATA'!A2",
+ "'[excel.xlsx]DATA'!A3",
+ "'[excel.xlsx]DATA'!A3:A4",
+ "'[excel.xlsx]DATA'!A4",
+ "'[excel.xlsx]DATA'!B2",
+ "'[excel.xlsx]DATA'!B3",
+ "'[excel.xlsx]DATA'!B4",
+ "'[excel.xlsx]DATA'!C2",
+ "'[excel.xlsx]DATA'!D2"]
+
+[graph]
+
+
+JSON export/import
+------------------
+
+The *ExcelModel* can be exported/imported to/from a readable JSON
+format. The reason of this functionality is to have format that can be
+easily maintained (e.g. using version control programs like *git*).
+Follows an example on how to export/import to/from JSON an
+*ExcelModel*:
+
+::
+
+   >>> import json
+   >>> xl_dict = xl_model.to_dict()  # To JSON-able dict.
+   >>> xl_dict  # Exported format.
+   {
+    "'[excel.xlsx]DATA'!A1": "inputs",
+    "'[excel.xlsx]DATA'!B1": "Intermediate",
+    "'[excel.xlsx]DATA'!C1": "outputs",
+    "'[excel.xlsx]DATA'!D1": "defaults",
+    "'[excel.xlsx]DATA'!A2": 2,
+    "'[excel.xlsx]DATA'!D2": 1,
+    "'[excel.xlsx]DATA'!A3": 6,
+    "'[excel.xlsx]DATA'!A4": 5,
+    "'[excel.xlsx]DATA'!B2": "=('[excel.xlsx]DATA'!A2 + '[excel.xlsx]DATA'!A3)",
+    "'[excel.xlsx]DATA'!C2": "=(('[excel.xlsx]DATA'!B2 / '[excel.xlsx]DATA'!B3) + '[excel.xlsx]DATA'!D2)",
+    "'[excel.xlsx]DATA'!B3": "=('[excel.xlsx]DATA'!B2 - '[excel.xlsx]DATA'!A3)",
+    "'[excel.xlsx]DATA'!C3": "=(('[excel.xlsx]DATA'!C2 * '[excel.xlsx]DATA'!A2) + '[excel.xlsx]DATA'!D3)",
+    "'[excel.xlsx]DATA'!D3": "=(1 + '[excel.xlsx]DATA'!D2)",
+    "'[excel.xlsx]DATA'!B4": "=MAX('[excel.xlsx]DATA'!A3:A4, '[excel.xlsx]DATA'!B2)",
+    "'[excel.xlsx]DATA'!C4": "=(('[excel.xlsx]DATA'!B3 ^ '[excel.xlsx]DATA'!C2) + '[excel.xlsx]DATA'!D4)",
+    "'[excel.xlsx]DATA'!D4": "=(1 + '[excel.xlsx]DATA'!D3)"
+   }
+   >>> xl_json = json.dumps(xl_dict, indent=True)  # To JSON.
+   >>> xl_model = formulas.ExcelModel().from_dict(json.loads(xl_json))  # From JSON.
+
+
+Custom functions
+================
+
+An example how to add a custom function to the formula parser is the
+following:
+
+>>> import formulas
+>>> FUNCTIONS = formulas.get_functions()
+>>> FUNCTIONS['MYFUNC'] = lambda x, y: 1 + y + x
+>>> func = formulas.Parser().ast('=MYFUNC(1, 2)')[1].compile()
+>>> func()
+4
+
+
+Advanced Examples
+*****************
+
+Formulas can also be embedded as a calculation engine inside
+lightweight applications and automated workflows, without requiring
+Excel or another spreadsheet GUI.
+
+
+Minimal Flask integration
+=========================
+
+This example loads a workbook once, exposes it through a Flask
+application, and calls the JSON API through a test client.
+
+.. code:: python
+
+   from formulas.app import create_app
+
+   app = create_app(files=('test/test_files/excel.xlsx',), circular=False)
+   client = app.test_client()
+   response = client.post('/api/calculate', json={
+       'inputs': {
+           "'[excel.xlsx]'!INPUT_A": 3,
+           "'[excel.xlsx]DATA'!B3": 1,
+       },
+       'renders': ["'[excel.xlsx]DATA'!C2=result"],
+   })
+
+   assert response.status_code == 200
+   assert response.get_json()['outputs'] == {'result': 10.0}
+
+
+Batch automation
+================
+
+This example creates a temporary batch file and runs *formulas calc*
+over two scenarios.
+
+.. code:: python
+
+   import json
+   import subprocess
+   import sys
+   import tempfile
+   from pathlib import Path
+
+   with tempfile.TemporaryDirectory() as tmp:
+       batch = Path(tmp) / 'batch.json'
+       batch.write_text(json.dumps([
+           {
+               'name': 'base',
+               'overwrite': {
+                   "'[excel.xlsx]'!INPUT_A": 3,
+                   "'[excel.xlsx]DATA'!B3": 1,
+               },
+               'renders': ["'[excel.xlsx]DATA'!C2=result"],
+           },
+           {
+               'name': 'stress',
+               'overwrite': {
+                   "'[excel.xlsx]'!INPUT_A": 4,
+                   "'[excel.xlsx]DATA'!B3": 1,
+               },
+               'renders': ["'[excel.xlsx]DATA'!C2=result"],
+           },
+       ], indent=2))
+
+       result = subprocess.run([
+           sys.executable, '-m', 'formulas.cli', 'calc',
+           'test/test_files/excel.xlsx',
+           '--batch', str(batch),
+           '--processes', '2',
+           '--output-format', 'json',
+           '--output-dir', tmp,
+       ], capture_output=True, text=True, check=False)
+
+       assert result.returncode == 0, result.stderr
+       summary = json.loads(result.stdout)
+       assert [item['name'] for item in summary] == ['base', 'stress']
+
+
+ETL transformer
+===============
+
+This example treats a workbook as a transformation step over
+structured input records.
+
+.. code:: python
+
+   import formulas
+
+   model = formulas.ExcelModel().loads('test/test_files/excel.xlsx').finish()
+   func = model.compile(
+       inputs=["'[excel.xlsx]'!INPUT_A", "'[excel.xlsx]DATA'!B3"],
+       outputs=["'[excel.xlsx]DATA'!C2"],
+   )
+   records = [
+       {'id': 'row-1', 'input_a': 3, 'b3': 1},
+       {'id': 'row-2', 'input_a': 4, 'b3': 1},
+   ]
+   results = []
+
+   for record in records:
+       result, = func(record['input_a'], record['b3'])
+       results.append({
+           'id': record['id'],
+           'result': result.value[0, 0],
+       })
+
+   assert results == [
+       {'id': 'row-1', 'result': 10.0},
+       {'id': 'row-2', 'result': 11.0},
+   ]
+
+
+Excel Function Coverage
+***********************
+
+The current Excel function coverage is tracked in the test workbook
+*test/test_files/test.xlsx*, sheet *COVERAGE*. The table below
+summarizes the current implementation status by category.
+
++------------------+---------------+---------+------------+
+| Category         | Implemented   | Total   | Coverage   |
++==================+===============+=========+============+
+| AUTOMATION       | 0             | 3       | 0.0%       |
++------------------+---------------+---------+------------+
+| COMPATIBILITY    | 40            | 40      | 100.0%     |
++------------------+---------------+---------+------------+
+| CUBE             | 0             | 7       | 0.0%       |
++------------------+---------------+---------+------------+
+| DATABASE         | 0             | 12      | 0.0%       |
++------------------+---------------+---------+------------+
+| DATE & TIME      | 25            | 25      | 100.0%     |
++------------------+---------------+---------+------------+
+| ENGINEERING      | 54            | 54      | 100.0%     |
++------------------+---------------+---------+------------+
+| FINANCIAL        | 55            | 55      | 100.0%     |
++------------------+---------------+---------+------------+
+| INFORMATION      | 16            | 22      | 72.7%      |
++------------------+---------------+---------+------------+
+| LOGICAL          | 19            | 19      | 100.0%     |
++------------------+---------------+---------+------------+
+| LOOKUP           | 33            | 40      | 82.5%      |
++------------------+---------------+---------+------------+
+| MATH & TRIG      | 71            | 80      | 88.8%      |
++------------------+---------------+---------+------------+
+| STATISTICAL      | 111           | 111     | 100.0%     |
++------------------+---------------+---------+------------+
+| TEXT             | 44            | 50      | 88.0%      |
++------------------+---------------+---------+------------+
+| WEB              | 0             | 3       | 0.0%       |
++------------------+---------------+---------+------------+
+| OPERATORS        | 15            | 15      | 100.0%     |
++------------------+---------------+---------+------------+
+| TOTAL            | 483           | 536     | 90.1%      |
++------------------+---------------+---------+------------+
+
+Overall coverage is currently 483 out of 536 functions (90.1%).
