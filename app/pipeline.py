@@ -411,7 +411,10 @@ def apply_kmm_selection(records: List[dict], selection: Optional[BatchSelection]
         station = record.get("site") or ""
         named = [r for r in REGIONS if r and r in station]
         if named and selected not in named:
-            note = f"שם התחנה מציין {named[0]} אך נבחר {selected} - בדוק שיוך מרחב"
+            # "מרמז" (hints at), not "מציין" (states), on purpose: this is a
+            # substring match on the station's free-text name, not a field the
+            # report declares. The note must not overclaim what it knows.
+            note = f"שים לב: שם התחנה מרמז על {named[0]}, שונה מהבחירה ({selected})"
             if record.get("confidence") not in ("נמוכה", "בינונית"):
                 record["confidence"] = "בינונית"
             _append_note(record, note)
